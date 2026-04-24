@@ -1,6 +1,6 @@
-# GPULearnedFS
+# GAMA
 
-一个面向 WSL2 + libfuse3 + CUDA 的原型文件系统项目。
+一个面向 WSL2 + libfuse3 + CUDA 的 GPU-assisted metadata accelerator。
 
 ## 快速启动
 
@@ -18,6 +18,7 @@ cmake --build build -j$(nproc)
 ```
 
 默认挂载点：`/home/user/data`
+默认 backing root：`./backing_root`
 
 ### 3. 卸载
 
@@ -34,7 +35,7 @@ cmake --build build -j$(nproc)
 
 ## 当前支持的原型语义
 
-已实现（原型级，内存态）：
+已实现：
 
 - `stat/getattr`
 - `readdir`
@@ -44,14 +45,14 @@ cmake --build build -j$(nproc)
 - `read/write/truncate`
 - `utimens`
 
-说明：当前版本不接入真实 ext4 后端，文件内容与元数据都在进程内存中，重启/卸载后不会持久化。
+说明：usable mode 会显式代理到 `backing_root`；strict mode 则只走加速器路径。
 
 ## 关于“把 ext4 目录挂载到 GLFS”
 
-如果你的目标是“把已有 ext4 目录作为 GLFS 的后端数据源”，这是合理的下一步：
+如果你的目标是“把已有 ext4 目录作为 GAMA 的后端数据源”，这是当前设计目标：
 
 - 不建议用 Linux 的 `mount --bind` 直接把 ext4 目录叠到同一个挂载点（会和 FUSE 挂载冲突）
-- 正确做法一般是：GLFS 自己维护一个 `backing_root`（例如 `/home/user/data_real`），在 FUSE 回调中把路径映射到该目录并用 `openat/statat/readdir` 等系统调用代理
+- 正确做法是：GAMA 维护一个 `backing_root`，在 usable mode 下把路径映射到该目录并用文件系统代理实现 fallback
 
 是否与计划/spec 冲突取决于你想要的 benchmark 严格模式（比如 miss 是否允许 fallback），这需要对照 `plans/GLFS SPEC.md` 和 `plans/GPULearnedFS 实施计划（人类可读版 · QA格式）.md` 再定。
 

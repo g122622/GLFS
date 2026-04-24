@@ -62,6 +62,8 @@ FSConfig load_config(const std::string& filepath) {
 
     cfg.fs.mount_point = get_string_or(root.at("fs"), "mount_point", "/home/user/data");
     cfg.fs.fuse_opts = get_string_array_or(root.at("fs"), "fuse_opts", {"-o", "auto_cache"});
+    cfg.fs.backing_root = get_string_or(root.at("fs"), "backing_root", "./backing_root");
+    cfg.fs.strict_mode = root.at("fs").contains("strict_mode") ? root.at("fs").at("strict_mode").as_bool() : false;
 
     cfg.index.type = get_string_or(root.at("index"), "type", "g-index");
     if (root.at("index").contains("training")) {
@@ -90,6 +92,9 @@ void validate_config(const FSConfig& cfg) {
     if (cfg.fs.mount_point.empty()) {
         throw ValidationError("missing: fs.mount_point");
     }
+    if (cfg.fs.backing_root.empty()) {
+        throw ValidationError("missing: fs.backing_root");
+    }
     if (cfg.index.type.empty()) {
         throw ValidationError("missing: index.type");
     }
@@ -101,6 +106,9 @@ void validate_config(const FSConfig& cfg) {
     }
     if (cfg.index.inference.fallback_on_miss) {
         throw ValidationError("config.index.inference.fallback_on_miss must be false");
+    }
+    if (cfg.fs.strict_mode && cfg.index.inference.fallback_on_miss) {
+        throw ValidationError("strict_mode cannot be combined with fallback_on_miss");
     }
     if (cfg.benchmark.warmup_iters == 0) {
         throw ValidationError("benchmark.warmup_iters must be > 0");

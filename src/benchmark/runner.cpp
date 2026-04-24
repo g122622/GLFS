@@ -32,11 +32,12 @@ std::vector<std::pair<std::string, std::string>> scenarios() {
 
 std::vector<BenchmarkResult> run_benchmarks(const std::string& mount_point, const FSConfig& cfg) {
     std::vector<BenchmarkResult> results;
-    auto* index = create_index(cfg.index.type);
+    auto* control_plane = create_control_plane(cfg.index.type);
+    FSConfig runtime_cfg = cfg;
+    runtime_cfg.fs.mount_point = mount_point;
     GPULearnedFS fs;
     fs.path_cfg.mount_point = mount_point;
-    fs.index = index;
-    gpufs_seed_demo_tree(fs);
+    gpufs_init(fs, control_plane, runtime_cfg);
     set_active_fs(&fs);
 
     for (const auto& [scenario, rel_path] : scenarios()) {
@@ -63,12 +64,12 @@ std::vector<BenchmarkResult> run_benchmarks(const std::string& mount_point, cons
         result.p99_us = percentile(durations, 0.99);
         result.p999_us = percentile(durations, 0.999);
         result.throughput_qps = durations.empty() ? 0.0 : (static_cast<double>(durations.size()) * 1000000.0 / std::accumulate(durations.begin(), durations.end(), 0.0));
-        result.index_stats = index->get_stats();
+        result.index_stats = control_plane->get_stats();
         results.push_back(result);
     }
 
     perfetto_flush();
-    destroy_index(index);
+    destroy_control_plane(control_plane);
     return results;
 }
 

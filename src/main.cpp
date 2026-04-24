@@ -50,17 +50,17 @@ int main(int argc, char** argv) {
 
         glfs::tracing_init("gpufs");
 
-        auto* index = glfs::create_index(cfg.index.type);
+        auto* control_plane = glfs::create_control_plane(cfg.index.type);
         glfs::GPULearnedFS fs;
-        fs.path_cfg.mount_point = cfg.fs.mount_point;
-        fs.index = index;
         fs.verbose = foreground;
-        glfs::gpufs_seed_demo_tree(fs);
+        glfs::gpufs_init(fs, control_plane, cfg);
         glfs::set_active_fs(&fs);
 
         std::cout << "GPULearnedFS mount entry ready\n";
         std::cout << "mount_point=" << cfg.fs.mount_point << '\n';
         std::cout << "index_type=" << cfg.index.type << '\n';
+        std::cout << "backing_root=" << cfg.fs.backing_root << '\n';
+        std::cout << "strict_mode=" << (cfg.fs.strict_mode ? "true" : "false") << '\n';
 
         auto ops = glfs::build_fuse_operations();
         std::vector<std::string> storage;
@@ -94,7 +94,7 @@ int main(int argc, char** argv) {
         std::cout << "mounting...\n";
         int ret = fuse_main(static_cast<int>(fuse_args.size()), fuse_args.data(), &ops, nullptr);
 
-        glfs::destroy_index(index);
+        glfs::destroy_control_plane(control_plane);
         return ret == 0 ? 0 : 1;
     } catch (const std::exception& ex) {
         std::cerr << "fatal: " << ex.what() << '\n';

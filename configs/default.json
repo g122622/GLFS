@@ -1,7 +1,9 @@
 {
   "fs": {
     "mount_point": "/home/user/data",
-    "fuse_opts": ["-o", "auto_cache"]
+    "fuse_opts": ["-o", "auto_cache"],
+    "backing_root": "./backing_root",
+    "strict_mode": false
   },
   "index": {
     "type": "g-index",

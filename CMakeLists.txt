@@ -11,6 +11,7 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 
 find_package(PkgConfig REQUIRED)
 pkg_check_modules(FUSE3 REQUIRED fuse3)
+find_package(CUDAToolkit REQUIRED)
 
 add_library(glfs_core
     src/utils/json_parser.cpp
@@ -25,6 +26,7 @@ add_library(glfs_core
     src/core/backends/pgm_gpu/backend.cpp
     src/core/backends/ligpu/backend.cpp
     src/fuse/gpufs_ops.cpp
+    src/fuse/backing_root_proxy.cpp
     src/fuse/client_api.cpp
     src/benchmark/runner.cpp
 )
@@ -46,7 +48,7 @@ endif()
 
 target_compile_options(glfs_core PUBLIC ${FUSE3_CFLAGS_OTHER})
 target_link_directories(glfs_core PUBLIC ${FUSE3_LIBRARY_DIRS})
-target_link_libraries(glfs_core PUBLIC ${FUSE3_LIBRARIES})
+target_link_libraries(glfs_core PUBLIC ${FUSE3_LIBRARIES} CUDA::cudart)
 
 add_executable(gpufs src/main.cpp)
 target_link_libraries(gpufs PRIVATE glfs_core)

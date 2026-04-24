@@ -15,6 +15,8 @@ struct FSConfig {
     struct {
         std::string mount_point;
         std::vector<std::string> fuse_opts;
+        std::string backing_root = "./backing_root";
+        bool strict_mode = false;
     } fs;
 
     struct {

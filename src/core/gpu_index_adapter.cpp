@@ -152,6 +152,62 @@ private:
     mutable std::vector<double> latencies_us_;
 };
 
+class LocalGPUControlPlane final : public IGPUControlPlane {
+public:
+    void initialize(const std::string& index_type) override {
+        if (!index_) {
+            index_.reset(create_index(index_type));
+        }
+        index_type_ = index_type.empty() ? "g-index" : index_type;
+    }
+
+    void train(const std::vector<std::uint64_t>& keys,
+               const std::vector<std::uint64_t>& values,
+               const TrainingConfig& cfg) override {
+        ensure_index(cfg.index_type);
+        index_->train(keys, values, cfg);
+    }
+
+    ControlResult lookup(std::uint64_t key) override {
+        ControlResult result;
+        ensure_index(index_type_);
+        auto values = index_->batch_lookup({key});
+        if (!values.empty() && values[0] != INVALID_INODE) {
+            result.inode = values[0];
+            result.reason = "control_plane_hit";
+            return result;
+        }
+        result.fallback_to_backing_root = true;
+        result.reason = "control_plane_miss";
+        return result;
+    }
+
+    IndexStats get_stats() const override {
+        return index_ ? index_->get_stats() : IndexStats{};
+    }
+
+    void enable_profiling(bool enabled) override {
+        if (index_) {
+            index_->enable_profiling(enabled);
+        }
+    }
+
+    IGPUIndex* index() override {
+        return index_.get();
+    }
+
+private:
+    void ensure_index(const std::string& type) {
+        if (!index_) {
+            index_.reset(create_index(type));
+            index_type_ = type.empty() ? "g-index" : type;
+        }
+    }
+
+    std::unique_ptr<IGPUIndex> index_;
+    std::string index_type_ = "g-index";
+};
+
 }  // namespace
 
 IGPUIndex* create_index(const std::string& type) {
@@ -160,6 +216,16 @@ IGPUIndex* create_index(const std::string& type) {
 
 void destroy_index(IGPUIndex* index) {
     delete index;
+}
+
+IGPUControlPlane* create_control_plane(const std::string& type) {
+    auto* cp = new LocalGPUControlPlane();
+    cp->initialize(type);
+    return cp;
+}
+
+void destroy_control_plane(IGPUControlPlane* control_plane) {
+    delete control_plane;
 }
 
 }  // namespace glfs

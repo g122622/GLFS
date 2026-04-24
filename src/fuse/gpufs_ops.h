@@ -16,6 +16,7 @@
 #include "config/config_manager.h"
 #include "core/gpu_index_adapter.h"
 #include "core/path_encoder.h"
+#include "fuse/backing_root_proxy.h"
 
 namespace glfs {
 
@@ -33,9 +34,12 @@ struct GPULearnedFS {
         std::vector<std::uint8_t> data;  // files only
     };
 
-    IGPUIndex* index = nullptr;
+    IGPUControlPlane* control_plane = nullptr;
+    BackingRootProxy backing_root;
     PathConfig path_cfg;
     std::string mount_point = "/home/user/data";
+    bool strict_mode = false;
+    bool usable_mode = true;
     mutable std::mutex global_lock;
     std::map<std::string, NodeEntry> nodes;
     std::map<std::string, std::vector<std::string>> children;
@@ -43,8 +47,9 @@ struct GPULearnedFS {
     bool verbose = false;
 };
 
-void gpufs_init(GPULearnedFS& fs, IGPUIndex* index, const PathConfig& cfg, const std::vector<std::pair<std::string, std::uint64_t>>& training_set);
-void gpufs_seed_demo_tree(GPULearnedFS& fs);
+void gpufs_init(GPULearnedFS& fs,
+                IGPUControlPlane* control_plane,
+                const FSConfig& cfg);
 
 int gpufs_getattr(const char* path, struct stat* stbuf, struct fuse_file_info* fi);
 int gpufs_readdir(const char* path, void* buf, fuse_fill_dir_t filler, off_t offset, struct fuse_file_info* fi, enum fuse_readdir_flags flags);
