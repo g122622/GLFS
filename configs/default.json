@@ -1,0 +1,24 @@
+{
+  "fs": {
+    "mount_point": "/home/user/data",
+    "fuse_opts": ["-o", "auto_cache"]
+  },
+  "index": {
+    "type": "g-index",
+    "training": {
+      "sample_ratio": 1.0,
+      "key_encoding": "trie_prefix"
+    },
+    "inference": {
+      "batch_size": 256,
+      "fallback_on_miss": false
+    },
+    "resource": {
+      "max_vram_bytes": 1073741824
+    }
+  },
+  "benchmark": {
+    "warmup_iters": 100,
+    "metrics": ["p50", "p99", "throughput"]
+  }
+}
