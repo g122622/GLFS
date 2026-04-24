@@ -5,6 +5,7 @@
 #include <cstring>
 #include <ctime>
 #include <filesystem>
+#include <iostream>
 #include <unistd.h>
 
 #include "utils/perfetto_integration.h"
@@ -159,6 +160,51 @@ void load_cache_from_backing_root(GPULearnedFS& fs, std::vector<std::uint64_t>& 
         std::sort(child_list.begin(), child_list.end());
         child_list.erase(std::unique(child_list.begin(), child_list.end()), child_list.end());
     }
+    fs.children[fs.mount_point];
+}
+
+void refresh_cached_path(GPULearnedFS& fs, const std::string& abs_path) {
+    if (!fs.usable_mode) {
+        return;
+    }
+    std::vector<std::string> entries;
+    struct stat st{};
+    if (fs.backing_root.getattr(abs_path, &st) != 0) {
+        fs.nodes.erase(abs_path);
+        return;
+    }
+    auto it = fs.nodes.find(abs_path);
+    if (it == fs.nodes.end()) {
+        GPULearnedFS::NodeEntry entry;
+        entry.inode = fs.next_inode++;
+        entry.is_dir = S_ISDIR(st.st_mode);
+        entry.mode = st.st_mode;
+        entry.uid = st.st_uid;
+        entry.gid = st.st_gid;
+        entry.size = static_cast<std::uint64_t>(st.st_size);
+        entry.atime = st.st_atim;
+        entry.mtime = st.st_mtim;
+        entry.ctime = st.st_ctim;
+        fs.nodes[abs_path] = std::move(entry);
+    } else {
+        it->second.is_dir = S_ISDIR(st.st_mode);
+        it->second.mode = st.st_mode;
+        it->second.uid = st.st_uid;
+        it->second.gid = st.st_gid;
+        it->second.size = static_cast<std::uint64_t>(st.st_size);
+        it->second.atime = st.st_atim;
+        it->second.mtime = st.st_mtim;
+        it->second.ctime = st.st_ctim;
+    }
+    const auto parent = parent_of(abs_path);
+    if (!parent.empty()) {
+        auto& kids = fs.children[parent];
+        const auto name = basename_of(abs_path);
+        if (std::find(kids.begin(), kids.end(), name) == kids.end() && abs_path != fs.mount_point) {
+            kids.push_back(name);
+            std::sort(kids.begin(), kids.end());
+        }
+    }
 }
 
 int apply_fallback_getattr(GPULearnedFS& fs, const std::string& abs, struct stat* stbuf) {
@@ -209,6 +255,8 @@ void gpufs_init(GPULearnedFS& fs,
     fs.path_cfg.mount_point = cfg.fs.mount_point;
     fs.mount_point = cfg.fs.mount_point;
     fs.backing_root.set_root(cfg.fs.backing_root);
+    fs.backing_root.set_mount_point(cfg.fs.mount_point);
+    fs.backing_root.set_mount_root(normalize_path(cfg.fs.mount_point));
     fs.strict_mode = cfg.fs.strict_mode;
     fs.usable_mode = !cfg.fs.strict_mode;
     fs.nodes.clear();
@@ -217,6 +265,12 @@ void gpufs_init(GPULearnedFS& fs,
 
     if (fs.backing_root.ensure_root() != 0) {
         // leave usable mode on but allow the mount to continue; fallback will surface errors
+    }
+    if (fs.verbose) {
+        std::cerr << "[gpufs] init mount=" << fs.mount_point
+                  << " backing_root=" << fs.backing_root.root()
+                  << " mount_root=" << normalize_path(cfg.fs.mount_point)
+                  << '\n';
     }
 
     std::vector<std::uint64_t> keys;
@@ -246,6 +300,18 @@ int gpufs_getattr(const char* path, struct stat* stbuf, ::fuse_file_info*) {
     }
     std::lock_guard<std::mutex> lock(fs->global_lock);
     const std::string abs = join_mount_path(fs->mount_point, path);
+    if (fs->verbose) {
+        std::cerr << "[gpufs] getattr " << abs << '\n';
+    }
+
+    if (fs->usable_mode) {
+        const auto rc = fs->backing_root.getattr(abs, stbuf);
+        if (rc == 0) {
+            perfetto_track_event("fuse.getattr", start, now_ns() - start);
+            return 0;
+        }
+        return rc;
+    }
 
     auto it = fs->nodes.find(abs);
     if (it != fs->nodes.end()) {
@@ -285,8 +351,18 @@ int gpufs_readdir(const char* path, void* buf, ::fuse_fill_dir_t filler, off_t, 
     }
     std::lock_guard<std::mutex> lock(fs->global_lock);
     const std::string abs = join_mount_path(fs->mount_point, path);
+    if (fs->verbose) {
+        std::cerr << "[gpufs] readdir " << abs << '\n';
+    }
 
     auto node_it = fs->nodes.find(abs);
+    if (fs->usable_mode) {
+        const auto rc = apply_fallback_readdir(*fs, abs, buf, filler);
+        if (rc == 0) {
+            perfetto_track_event("fuse.readdir", start, now_ns() - start);
+        }
+        return rc;
+    }
     if (node_it == fs->nodes.end()) {
         const auto rc = apply_fallback_readdir(*fs, abs, buf, filler);
         if (rc == 0) {
@@ -307,7 +383,7 @@ int gpufs_readdir(const char* path, void* buf, ::fuse_fill_dir_t filler, off_t, 
     fill_stat_from_node(node_it->second, &dir_stub);
     filler(buf, ".", &dir_stub, 0, static_cast<fuse_fill_dir_flags>(0));
     filler(buf, "..", &dir_stub, 0, static_cast<fuse_fill_dir_flags>(0));
-    if (kids) {
+    if (kids && !kids->empty()) {
         for (const auto& name : *kids) {
             std::string child_path = abs == "/" ? "/" + name : abs + "/" + name;
             auto node = fs->nodes.find(child_path);
@@ -316,6 +392,16 @@ int gpufs_readdir(const char* path, void* buf, ::fuse_fill_dir_t filler, off_t, 
                 fill_stat_from_node(node->second, &st);
             }
             filler(buf, name.c_str(), &st, 0, static_cast<fuse_fill_dir_flags>(0));
+        }
+    } else if (fs->usable_mode) {
+        std::vector<std::string> entries;
+        if (fs->backing_root.listdir(abs, entries) == 0) {
+            for (const auto& name : entries) {
+                struct stat st{};
+                const auto child = abs == "/" ? "/" + name : abs + "/" + name;
+                fs->backing_root.getattr(child, &st);
+                filler(buf, name.c_str(), &st, 0, static_cast<fuse_fill_dir_flags>(0));
+            }
         }
     }
     node_it->second.atime = now_ts();
@@ -329,6 +415,16 @@ int gpufs_open(const char* path, struct fuse_file_info*) {
         return -EIO;
     }
     const std::string abs = join_mount_path(fs->mount_point, path);
+    if (fs->verbose) {
+        std::cerr << "[gpufs] open " << abs << '\n';
+    }
+    if (fs->usable_mode) {
+        struct stat st{};
+        if (fs->backing_root.getattr(abs, &st) != 0) {
+            return -ENOENT;
+        }
+        return S_ISDIR(st.st_mode) ? -EISDIR : 0;
+    }
     auto it = fs->nodes.find(abs);
     if (it == fs->nodes.end()) {
         if (!fs->usable_mode) {
@@ -350,6 +446,17 @@ int gpufs_create(const char* path, mode_t mode, struct fuse_file_info* fi) {
     }
     std::lock_guard<std::mutex> lock(fs->global_lock);
     const std::string abs = join_mount_path(fs->mount_point, path);
+    if (fs->verbose) {
+        std::cerr << "[gpufs] create " << abs << " mode=" << std::oct << mode << std::dec << '\n';
+    }
+    if (fs->usable_mode) {
+        const auto rc = fs->backing_root.create(abs, mode);
+        if (rc < 0) {
+            return rc;
+        }
+        refresh_cached_path(*fs, abs);
+        return 0;
+    }
     if (fs->nodes.find(abs) != fs->nodes.end()) {
         return -EEXIST;
     }
@@ -376,6 +483,7 @@ int gpufs_create(const char* path, mode_t mode, struct fuse_file_info* fi) {
     }
     if (fs->usable_mode) {
         fs->backing_root.create(abs, mode);
+        refresh_cached_path(*fs, abs);
     }
     return 0;
 }
@@ -387,6 +495,24 @@ int gpufs_unlink(const char* path) {
     }
     std::lock_guard<std::mutex> lock(fs->global_lock);
     const std::string abs = join_mount_path(fs->mount_point, path);
+    if (fs->verbose) {
+        std::cerr << "[gpufs] unlink " << abs << '\n';
+    }
+    if (fs->usable_mode) {
+        const auto rc = fs->backing_root.unlink(abs);
+        if (rc < 0) {
+            return rc;
+        }
+        fs->nodes.erase(abs);
+        const auto parent = parent_of(abs);
+        auto kids_it = fs->children.find(parent);
+        if (kids_it != fs->children.end()) {
+            auto& kids = kids_it->second;
+            kids.erase(std::remove(kids.begin(), kids.end(), basename_of(abs)), kids.end());
+        }
+        fs->children.erase(abs);
+        return 0;
+    }
     auto it = fs->nodes.find(abs);
     if (it == fs->nodes.end() || it->second.is_dir) {
         if (!fs->usable_mode) {
@@ -414,6 +540,17 @@ int gpufs_mkdir(const char* path, mode_t mode) {
     }
     std::lock_guard<std::mutex> lock(fs->global_lock);
     const std::string abs = join_mount_path(fs->mount_point, path);
+    if (fs->verbose) {
+        std::cerr << "[gpufs] mkdir " << abs << " mode=" << std::oct << mode << std::dec << '\n';
+    }
+    if (fs->usable_mode) {
+        const auto rc = fs->backing_root.mkdir(abs, mode);
+        if (rc < 0) {
+            return rc;
+        }
+        refresh_cached_path(*fs, abs);
+        return 0;
+    }
     if (fs->nodes.find(abs) != fs->nodes.end()) {
         return -EEXIST;
     }
@@ -438,6 +575,7 @@ int gpufs_mkdir(const char* path, mode_t mode) {
     fs->children[abs] = {};
     if (fs->usable_mode) {
         fs->backing_root.mkdir(abs, mode);
+        refresh_cached_path(*fs, abs);
     }
     return 0;
 }
@@ -453,6 +591,18 @@ int gpufs_rename(const char* from, const char* to, unsigned int flags) {
     std::lock_guard<std::mutex> lock(fs->global_lock);
     const std::string abs_from = join_mount_path(fs->mount_point, from);
     const std::string abs_to = join_mount_path(fs->mount_point, to);
+    if (fs->verbose) {
+        std::cerr << "[gpufs] rename " << abs_from << " -> " << abs_to << '\n';
+    }
+    if (fs->usable_mode) {
+        const auto rc = fs->backing_root.rename(abs_from, abs_to);
+        if (rc == 0) {
+            fs->nodes.erase(abs_from);
+            fs->children.erase(abs_from);
+            refresh_cached_path(*fs, abs_to);
+        }
+        return rc;
+    }
     auto it = fs->nodes.find(abs_from);
     if (it == fs->nodes.end()) {
         if (!fs->usable_mode) {
@@ -491,7 +641,11 @@ int gpufs_rename(const char* from, const char* to, unsigned int flags) {
     }
 
     if (fs->usable_mode) {
-        return fs->backing_root.rename(abs_from, abs_to);
+        const auto rc = fs->backing_root.rename(abs_from, abs_to);
+        if (rc == 0) {
+            refresh_cached_path(*fs, abs_to);
+        }
+        return rc;
     }
 
     return 0;
@@ -507,6 +661,16 @@ int gpufs_truncate(const char* path, off_t size, struct fuse_file_info*) {
     }
     std::lock_guard<std::mutex> lock(fs->global_lock);
     const std::string abs = join_mount_path(fs->mount_point, path);
+    if (fs->verbose) {
+        std::cerr << "[gpufs] truncate " << abs << " size=" << size << '\n';
+    }
+    if (fs->usable_mode) {
+        const auto rc = fs->backing_root.truncate(abs, size);
+        if (rc == 0) {
+            refresh_cached_path(*fs, abs);
+        }
+        return rc;
+    }
     auto it = fs->nodes.find(abs);
     if (it == fs->nodes.end()) {
         if (!fs->usable_mode) {
@@ -521,7 +685,11 @@ int gpufs_truncate(const char* path, off_t size, struct fuse_file_info*) {
     it->second.size = static_cast<std::uint64_t>(size);
     it->second.mtime = it->second.ctime = now_ts();
     if (fs->usable_mode) {
-        fs->backing_root.truncate(abs, size);
+        const auto rc = fs->backing_root.truncate(abs, size);
+        if (rc == 0) {
+            refresh_cached_path(*fs, abs);
+        }
+        return rc;
     }
     return 0;
 }
@@ -536,6 +704,12 @@ int gpufs_read(const char* path, char* buf, size_t size, off_t offset, struct fu
     }
     std::lock_guard<std::mutex> lock(fs->global_lock);
     const std::string abs = join_mount_path(fs->mount_point, path);
+    if (fs->verbose) {
+        std::cerr << "[gpufs] read " << abs << " size=" << size << " offset=" << offset << '\n';
+    }
+    if (fs->usable_mode) {
+        return fs->backing_root.read(abs, buf, size, offset);
+    }
     auto it = fs->nodes.find(abs);
     if (it == fs->nodes.end()) {
         if (!fs->usable_mode) {
@@ -554,6 +728,9 @@ int gpufs_read(const char* path, char* buf, size_t size, off_t offset, struct fu
     const std::size_t n = std::min<std::size_t>(size, it->second.data.size() - off);
     std::memcpy(buf, it->second.data.data() + off, n);
     it->second.atime = now_ts();
+    if (fs->usable_mode) {
+        refresh_cached_path(*fs, abs);
+    }
     return static_cast<int>(n);
 }
 
@@ -567,6 +744,16 @@ int gpufs_write(const char* path, const char* buf, size_t size, off_t offset, st
     }
     std::lock_guard<std::mutex> lock(fs->global_lock);
     const std::string abs = join_mount_path(fs->mount_point, path);
+    if (fs->verbose) {
+        std::cerr << "[gpufs] write " << abs << " size=" << size << " offset=" << offset << '\n';
+    }
+    if (fs->usable_mode) {
+        const auto rc = fs->backing_root.write(abs, buf, size, offset);
+        if (rc >= 0) {
+            refresh_cached_path(*fs, abs);
+        }
+        return rc;
+    }
     auto it = fs->nodes.find(abs);
     if (it == fs->nodes.end()) {
         if (!fs->usable_mode) {
@@ -586,7 +773,11 @@ int gpufs_write(const char* path, const char* buf, size_t size, off_t offset, st
     it->second.size = static_cast<std::uint64_t>(it->second.data.size());
     it->second.mtime = it->second.ctime = now_ts();
     if (fs->usable_mode) {
-        fs->backing_root.write(abs, buf, size, offset);
+        const auto rc = fs->backing_root.write(abs, buf, size, offset);
+        if (rc >= 0) {
+            refresh_cached_path(*fs, abs);
+        }
+        return rc;
     }
     return static_cast<int>(size);
 }
@@ -598,6 +789,9 @@ int gpufs_utimens(const char* path, const struct timespec tv[2], struct fuse_fil
     }
     std::lock_guard<std::mutex> lock(fs->global_lock);
     const std::string abs = join_mount_path(fs->mount_point, path);
+    if (fs->verbose) {
+        std::cerr << "[gpufs] utimens " << abs << '\n';
+    }
     auto it = fs->nodes.find(abs);
     if (it == fs->nodes.end()) {
         return -ENOENT;
@@ -615,6 +809,17 @@ int gpufs_rmdir(const char* path) {
     }
     std::lock_guard<std::mutex> lock(fs->global_lock);
     const std::string abs = join_mount_path(fs->mount_point, path);
+    if (fs->verbose) {
+        std::cerr << "[gpufs] rmdir " << abs << '\n';
+    }
+    if (fs->usable_mode) {
+        const auto rc = fs->backing_root.rmdir(abs);
+        if (rc == 0) {
+            fs->nodes.erase(abs);
+            fs->children.erase(abs);
+        }
+        return rc;
+    }
     auto it = fs->nodes.find(abs);
     if (it == fs->nodes.end() || !it->second.is_dir) {
         if (!fs->usable_mode) {
@@ -642,6 +847,17 @@ int gpufs_rmdir(const char* path) {
 
 namespace {
 
+static void* fuse_init_thunk(struct fuse_conn_info*, struct fuse_config* cfg) {
+    if (cfg) {
+        cfg->attr_timeout = 0.0;
+        cfg->entry_timeout = 0.0;
+        cfg->negative_timeout = 0.0;
+        cfg->kernel_cache = 0;
+        cfg->auto_cache = 0;
+    }
+    return nullptr;
+}
+
 static int fuse_getattr_thunk(const char* path, struct stat* stbuf, struct fuse_file_info* fi) {
     return gpufs_getattr(path, stbuf, fi);
 }
@@ -662,6 +878,7 @@ static int fuse_create_thunk(const char* path, mode_t mode, struct fuse_file_inf
 
 struct fuse_operations build_fuse_operations() {
     struct fuse_operations ops{};
+    ops.init = fuse_init_thunk;
     ops.getattr = fuse_getattr_thunk;
     ops.readdir = fuse_readdir_thunk;
     ops.open = fuse_open_thunk;

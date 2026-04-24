@@ -1,30 +1,15 @@
 #include "fuse/backing_root_proxy.h"
 
 #include <cerrno>
+#include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <iostream>
 #include <system_error>
 
 namespace glfs {
 
-namespace {
-
 namespace fs = std::filesystem;
-
-bool is_relative_to_root(const fs::path& path, const fs::path& root) {
-    auto normalized_path = path.lexically_normal();
-    auto normalized_root = root.lexically_normal();
-    auto pit = normalized_path.begin();
-    auto rit = normalized_root.begin();
-    for (; rit != normalized_root.end(); ++rit, ++pit) {
-        if (pit == normalized_path.end() || *pit != *rit) {
-            return false;
-        }
-    }
-    return true;
-}
-
-}  // namespace
 
 BackingRootProxy::BackingRootProxy(std::string root) : root_(std::move(root)) {}
 
@@ -33,13 +18,40 @@ const std::string& BackingRootProxy::root() const {
 }
 
 void BackingRootProxy::set_root(std::string root) {
-    root_ = std::move(root);
+    root_ = std::filesystem::absolute(std::filesystem::path(std::move(root))).lexically_normal().string();
+}
+
+void BackingRootProxy::set_mount_point(std::string mount_point) {
+    mount_point_ = std::move(mount_point);
+}
+
+void BackingRootProxy::set_mount_root(std::string mount_root) {
+    mount_root_ = std::move(mount_root);
 }
 
 std::string BackingRootProxy::resolve(const std::string& absolute_path) const {
     fs::path rel = absolute_path;
     if (rel.is_absolute()) {
-        rel = rel.relative_path();
+        if (!mount_root_.empty() && absolute_path == mount_root_) {
+            return fs::path(root_).lexically_normal().string();
+        }
+        if (!mount_root_.empty() && absolute_path.rfind(mount_root_ + "/", 0) == 0) {
+            rel = fs::path(absolute_path).lexically_relative(mount_root_);
+        } else if (!mount_point_.empty() && absolute_path.rfind(mount_point_, 0) == 0) {
+            if (absolute_path == mount_point_) {
+                return fs::path(root_).lexically_normal().string();
+            }
+            if (absolute_path.rfind(mount_point_ + "/", 0) != 0) {
+                rel = rel.relative_path();
+            } else {
+                rel = fs::path(absolute_path).lexically_relative(mount_point_);
+            }
+        } else {
+            rel = rel.relative_path();
+        }
+    }
+    if (rel == ".") {
+        return fs::path(root_).lexically_normal().string();
     }
     return (fs::path(root_) / rel).lexically_normal().string();
 }
@@ -56,6 +68,7 @@ int BackingRootProxy::getattr(const std::string& absolute_path, struct stat* stb
     }
     std::error_code ec;
     const auto resolved = resolve(absolute_path);
+    std::cerr << "[backing_root] getattr " << absolute_path << " -> " << resolved << '\n';
     if (!fs::exists(resolved, ec)) {
         return -ENOENT;
     }
@@ -68,14 +81,15 @@ int BackingRootProxy::getattr(const std::string& absolute_path, struct stat* stb
         stbuf->st_nlink = fs::is_directory(status) ? 2 : 1;
         stbuf->st_blksize = 4096;
         stbuf->st_blocks = (stbuf->st_size + 511) / 512;
+        return 0;
     }
-    return 0;
 }
 
 int BackingRootProxy::listdir(const std::string& absolute_path, std::vector<std::string>& entries) const {
     entries.clear();
     std::error_code ec;
     const auto resolved = resolve(absolute_path);
+    std::cerr << "[backing_root] listdir " << absolute_path << " -> " << resolved << '\n';
     if (!fs::exists(resolved, ec)) {
         return -ENOENT;
     }
@@ -93,13 +107,17 @@ int BackingRootProxy::listdir(const std::string& absolute_path, std::vector<std:
 
 int BackingRootProxy::mkdir(const std::string& absolute_path, mode_t) const {
     std::error_code ec;
-    fs::create_directories(resolve(absolute_path), ec);
+    const auto resolved = resolve(absolute_path);
+    std::cerr << "[backing_root] mkdir " << absolute_path << " -> " << resolved << '\n';
+    fs::create_directories(resolved, ec);
     return ec ? -ec.value() : 0;
 }
 
 int BackingRootProxy::rmdir(const std::string& absolute_path) const {
     std::error_code ec;
-    auto removed = fs::remove(resolve(absolute_path), ec);
+    const auto resolved = resolve(absolute_path);
+    std::cerr << "[backing_root] rmdir " << absolute_path << " -> " << resolved << '\n';
+    auto removed = fs::remove(resolved, ec);
     if (ec) {
         return -ec.value();
     }
@@ -109,6 +127,7 @@ int BackingRootProxy::rmdir(const std::string& absolute_path) const {
 int BackingRootProxy::create(const std::string& absolute_path, mode_t) const {
     std::error_code ec;
     auto resolved = resolve(absolute_path);
+    std::cerr << "[backing_root] create " << absolute_path << " -> " << resolved << '\n';
     fs::create_directories(fs::path(resolved).parent_path(), ec);
     if (ec) {
         return -ec.value();
@@ -117,12 +136,15 @@ int BackingRootProxy::create(const std::string& absolute_path, mode_t) const {
     if (!out) {
         return -errno;
     }
+    out.flush();
     return 0;
 }
 
 int BackingRootProxy::unlink(const std::string& absolute_path) const {
     std::error_code ec;
-    auto removed = fs::remove(resolve(absolute_path), ec);
+    const auto resolved = resolve(absolute_path);
+    std::cerr << "[backing_root] unlink " << absolute_path << " -> " << resolved << '\n';
+    auto removed = fs::remove(resolved, ec);
     if (ec) {
         return -ec.value();
     }
@@ -131,17 +153,22 @@ int BackingRootProxy::unlink(const std::string& absolute_path) const {
 
 int BackingRootProxy::rename(const std::string& from, const std::string& to) const {
     std::error_code ec;
-    fs::create_directories(fs::path(resolve(to)).parent_path(), ec);
+    const auto resolved_from = resolve(from);
+    const auto resolved_to = resolve(to);
+    std::cerr << "[backing_root] rename " << from << " -> " << to << " => " << resolved_from << " -> " << resolved_to << '\n';
+    fs::create_directories(fs::path(resolved_to).parent_path(), ec);
     if (ec) {
         return -ec.value();
     }
-    fs::rename(resolve(from), resolve(to), ec);
+    fs::rename(resolved_from, resolved_to, ec);
     return ec ? -ec.value() : 0;
 }
 
 int BackingRootProxy::truncate(const std::string& absolute_path, off_t size) const {
     std::error_code ec;
-    fs::resize_file(resolve(absolute_path), static_cast<std::uintmax_t>(size), ec);
+    const auto resolved = resolve(absolute_path);
+    std::cerr << "[backing_root] truncate " << absolute_path << " -> " << resolved << " size=" << size << '\n';
+    fs::resize_file(resolved, static_cast<std::uintmax_t>(size), ec);
     return ec ? -ec.value() : 0;
 }
 
@@ -149,7 +176,9 @@ int BackingRootProxy::read(const std::string& absolute_path, char* buf, size_t s
     if (!buf) {
         return -EINVAL;
     }
-    std::ifstream in(resolve(absolute_path), std::ios::binary);
+    const auto resolved = resolve(absolute_path);
+    std::cerr << "[backing_root] read " << absolute_path << " -> " << resolved << " size=" << size << " offset=" << offset << '\n';
+    std::ifstream in(resolved, std::ios::binary);
     if (!in) {
         return -ENOENT;
     }
@@ -166,6 +195,7 @@ int BackingRootProxy::write(const std::string& absolute_path, const char* buf, s
         return -EINVAL;
     }
     auto resolved = resolve(absolute_path);
+    std::cerr << "[backing_root] write " << absolute_path << " -> " << resolved << " size=" << size << " offset=" << offset << '\n';
     std::fstream file(resolved, std::ios::in | std::ios::out | std::ios::binary);
     if (!file) {
         std::ofstream create(resolved, std::ios::binary);
@@ -186,6 +216,7 @@ int BackingRootProxy::write(const std::string& absolute_path, const char* buf, s
     if (!file) {
         return -errno;
     }
+    file.flush();
     return static_cast<int>(size);
 }
 

@@ -14,6 +14,8 @@ public:
 
     const std::string& root() const;
     void set_root(std::string root);
+    void set_mount_point(std::string mount_point);
+    void set_mount_root(std::string mount_root);
 
     std::string resolve(const std::string& absolute_path) const;
     int ensure_root() const;
@@ -31,6 +33,8 @@ public:
 
 private:
     std::string root_;
+    std::string mount_point_;
+    std::string mount_root_;
 };
 
 }  // namespace glfs
