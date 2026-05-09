@@ -4,7 +4,6 @@
 #include <cstring>
 #include <filesystem>
 #include <fstream>
-#include <iostream>
 #include <system_error>
 
 namespace glfs {
@@ -68,7 +67,6 @@ int BackingRootProxy::getattr(const std::string& absolute_path, struct stat* stb
     }
     std::error_code ec;
     const auto resolved = resolve(absolute_path);
-    std::cerr << "[backing_root] getattr " << absolute_path << " -> " << resolved << '\n';
     if (!fs::exists(resolved, ec)) {
         return -ENOENT;
     }
@@ -89,7 +87,6 @@ int BackingRootProxy::listdir(const std::string& absolute_path, std::vector<std:
     entries.clear();
     std::error_code ec;
     const auto resolved = resolve(absolute_path);
-    std::cerr << "[backing_root] listdir " << absolute_path << " -> " << resolved << '\n';
     if (!fs::exists(resolved, ec)) {
         return -ENOENT;
     }
@@ -108,7 +105,6 @@ int BackingRootProxy::listdir(const std::string& absolute_path, std::vector<std:
 int BackingRootProxy::mkdir(const std::string& absolute_path, mode_t) const {
     std::error_code ec;
     const auto resolved = resolve(absolute_path);
-    std::cerr << "[backing_root] mkdir " << absolute_path << " -> " << resolved << '\n';
     fs::create_directories(resolved, ec);
     return ec ? -ec.value() : 0;
 }
@@ -116,7 +112,6 @@ int BackingRootProxy::mkdir(const std::string& absolute_path, mode_t) const {
 int BackingRootProxy::rmdir(const std::string& absolute_path) const {
     std::error_code ec;
     const auto resolved = resolve(absolute_path);
-    std::cerr << "[backing_root] rmdir " << absolute_path << " -> " << resolved << '\n';
     auto removed = fs::remove(resolved, ec);
     if (ec) {
         return -ec.value();
@@ -127,7 +122,6 @@ int BackingRootProxy::rmdir(const std::string& absolute_path) const {
 int BackingRootProxy::create(const std::string& absolute_path, mode_t) const {
     std::error_code ec;
     auto resolved = resolve(absolute_path);
-    std::cerr << "[backing_root] create " << absolute_path << " -> " << resolved << '\n';
     fs::create_directories(fs::path(resolved).parent_path(), ec);
     if (ec) {
         return -ec.value();
@@ -143,7 +137,6 @@ int BackingRootProxy::create(const std::string& absolute_path, mode_t) const {
 int BackingRootProxy::unlink(const std::string& absolute_path) const {
     std::error_code ec;
     const auto resolved = resolve(absolute_path);
-    std::cerr << "[backing_root] unlink " << absolute_path << " -> " << resolved << '\n';
     auto removed = fs::remove(resolved, ec);
     if (ec) {
         return -ec.value();
@@ -155,7 +148,6 @@ int BackingRootProxy::rename(const std::string& from, const std::string& to) con
     std::error_code ec;
     const auto resolved_from = resolve(from);
     const auto resolved_to = resolve(to);
-    std::cerr << "[backing_root] rename " << from << " -> " << to << " => " << resolved_from << " -> " << resolved_to << '\n';
     fs::create_directories(fs::path(resolved_to).parent_path(), ec);
     if (ec) {
         return -ec.value();
@@ -167,7 +159,6 @@ int BackingRootProxy::rename(const std::string& from, const std::string& to) con
 int BackingRootProxy::truncate(const std::string& absolute_path, off_t size) const {
     std::error_code ec;
     const auto resolved = resolve(absolute_path);
-    std::cerr << "[backing_root] truncate " << absolute_path << " -> " << resolved << " size=" << size << '\n';
     fs::resize_file(resolved, static_cast<std::uintmax_t>(size), ec);
     return ec ? -ec.value() : 0;
 }
@@ -177,7 +168,6 @@ int BackingRootProxy::read(const std::string& absolute_path, char* buf, size_t s
         return -EINVAL;
     }
     const auto resolved = resolve(absolute_path);
-    std::cerr << "[backing_root] read " << absolute_path << " -> " << resolved << " size=" << size << " offset=" << offset << '\n';
     std::ifstream in(resolved, std::ios::binary);
     if (!in) {
         return -ENOENT;
@@ -195,7 +185,6 @@ int BackingRootProxy::write(const std::string& absolute_path, const char* buf, s
         return -EINVAL;
     }
     auto resolved = resolve(absolute_path);
-    std::cerr << "[backing_root] write " << absolute_path << " -> " << resolved << " size=" << size << " offset=" << offset << '\n';
     std::fstream file(resolved, std::ios::in | std::ios::out | std::ios::binary);
     if (!file) {
         std::ofstream create(resolved, std::ios::binary);

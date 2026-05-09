@@ -169,21 +169,110 @@ public:
     }
 
     ControlResult lookup(std::uint64_t key) override {
-        ControlResult result;
-        ensure_index(index_type_);
-        auto values = index_->batch_lookup({key});
-        if (!values.empty() && values[0] != INVALID_INODE) {
-            result.inode = values[0];
-            result.reason = "control_plane_hit";
-            return result;
+        auto results = lookup_batch({key});
+        if (!results.empty()) {
+            return results.front();
         }
+        ControlResult result;
         result.fallback_to_backing_root = true;
-        result.reason = "control_plane_miss";
+        result.reason = "control_plane_empty_batch";
         return result;
+    }
+
+    std::vector<ControlResult> lookup_batch(const std::vector<std::uint64_t>& keys) override {
+        std::vector<ControlResult> results;
+        results.reserve(keys.size());
+        if (keys.empty()) {
+            return results;
+        }
+        control_stats_.queued_requests += static_cast<std::uint64_t>(keys.size());
+        ensure_index(index_type_);
+        auto values = index_->batch_lookup(keys);
+        for (auto value : values) {
+            ControlResult result;
+            if (value != INVALID_INODE) {
+                result.inode = value;
+                result.reason = "control_plane_hit";
+                ++control_stats_.completed_requests;
+            } else {
+                result.fallback_to_backing_root = true;
+                result.reason = "control_plane_miss";
+                ++control_stats_.fallback_requests;
+            }
+            results.push_back(std::move(result));
+        }
+        return results;
+    }
+
+    MutationDecision decide_mutation(const MutationRequest& request) override {
+        MutationDecision decision;
+        control_stats_.queued_requests++;
+
+        switch (request.op) {
+            case MutationOp::Create:
+            case MutationOp::Mkdir:
+                decision.allowed = true;
+                decision.reason = "control_plane_allow_create_like";
+                ++control_stats_.completed_requests;
+                return decision;
+            case MutationOp::Truncate:
+                if (request.byte_size > 0) {
+                    decision.allowed = true;
+                    decision.reason = "control_plane_allow_truncate";
+                } else {
+                    decision.allowed = true;
+                    decision.reason = "control_plane_allow_truncate_zero";
+                }
+                ++control_stats_.completed_requests;
+                return decision;
+            case MutationOp::Unlink:
+                decision.allowed = true;
+                decision.reason = "control_plane_allow_unlink";
+                ++control_stats_.completed_requests;
+                return decision;
+            case MutationOp::Rename:
+                if (request.has_secondary) {
+                    decision.allowed = true;
+                    decision.reason = "control_plane_allow_rename";
+                } else {
+                    decision.allowed = false;
+                    decision.fallback_to_backing_root = true;
+                    decision.reason = "control_plane_rename_missing_target";
+                    ++control_stats_.fallback_requests;
+                    return decision;
+                }
+                ++control_stats_.completed_requests;
+                return decision;
+        }
+
+        decision.allowed = false;
+        decision.fallback_to_backing_root = true;
+        decision.reason = "control_plane_unknown_mutation";
+        ++control_stats_.fallback_requests;
+        return decision;
+    }
+
+    void submit_lookup_batch(const std::vector<std::uint64_t>& keys) override {
+        control_stats_.queued_requests += static_cast<std::uint64_t>(keys.size());
+        pending_batches_.push_back(keys);
+    }
+
+    void drain() override {
+        for (const auto& batch : pending_batches_) {
+            if (!batch.empty()) {
+                (void)index_->batch_lookup(batch);
+                control_stats_.completed_requests += static_cast<std::uint64_t>(batch.size());
+            }
+        }
+        pending_batches_.clear();
     }
 
     IndexStats get_stats() const override {
         return index_ ? index_->get_stats() : IndexStats{};
+    }
+
+    ControlPlaneStats get_control_plane_stats() const override {
+        return control_stats_;
     }
 
     void enable_profiling(bool enabled) override {
@@ -206,6 +295,8 @@ private:
 
     std::unique_ptr<IGPUIndex> index_;
     std::string index_type_ = "g-index";
+    ControlPlaneStats control_stats_;
+    std::vector<std::vector<std::uint64_t>> pending_batches_;
 };
 
 }  // namespace
@@ -216,12 +307,6 @@ IGPUIndex* create_index(const std::string& type) {
 
 void destroy_index(IGPUIndex* index) {
     delete index;
-}
-
-IGPUControlPlane* create_control_plane(const std::string& type) {
-    auto* cp = new LocalGPUControlPlane();
-    cp->initialize(type);
-    return cp;
 }
 
 void destroy_control_plane(IGPUControlPlane* control_plane) {

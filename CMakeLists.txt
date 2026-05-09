@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.20)
 
-project(GPULearnedFS VERSION 0.1.0 LANGUAGES CXX)
+project(GPULearnedFS VERSION 0.1.0 LANGUAGES CXX CUDA)
 
 option(GLFS_BUILD_TESTS "Build the GLFS self-tests" ON)
 option(GLFS_BUILD_BENCHMARKS "Build benchmark helpers" ON)
@@ -8,6 +8,8 @@ option(GLFS_BUILD_BENCHMARKS "Build benchmark helpers" ON)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
+set(CMAKE_CUDA_STANDARD 17)
+set(CMAKE_CUDA_STANDARD_REQUIRED ON)
 
 find_package(PkgConfig REQUIRED)
 pkg_check_modules(FUSE3 REQUIRED fuse3)
@@ -19,6 +21,7 @@ add_library(glfs_core
     src/config/config_manager.cpp
     src/core/path_encoder.cpp
     src/core/gpu_index_adapter.cpp
+    src/core/gpu_control_plane.cu
     src/core/backend_common.cpp
     src/core/backends/rmi_cuda/backend.cpp
     src/core/backends/g_index/backend.cpp

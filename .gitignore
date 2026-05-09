@@ -1,5 +1,6 @@
 /build
 /backing_root
+/.mnt
 
 # macos
 .DS_Store

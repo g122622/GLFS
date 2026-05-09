@@ -37,6 +37,34 @@ struct ControlResult {
     std::string reason;
 };
 
+struct ControlPlaneStats {
+    std::uint64_t queued_requests = 0;
+    std::uint64_t completed_requests = 0;
+    std::uint64_t fallback_requests = 0;
+};
+
+enum class MutationOp {
+    Create,
+    Mkdir,
+    Unlink,
+    Rename,
+    Truncate,
+};
+
+struct MutationRequest {
+    MutationOp op = MutationOp::Create;
+    std::uint64_t primary_key = INVALID_INODE;
+    std::uint64_t secondary_key = INVALID_INODE;
+    std::uint64_t byte_size = 0;
+    bool has_secondary = false;
+};
+
+struct MutationDecision {
+    bool allowed = false;
+    bool fallback_to_backing_root = false;
+    std::string reason;
+};
+
 class IGPUIndex {
 public:
     virtual ~IGPUIndex() = default;
@@ -60,7 +88,12 @@ public:
                        const std::vector<std::uint64_t>& values,
                        const TrainingConfig& cfg) = 0;
     virtual ControlResult lookup(std::uint64_t key) = 0;
+    virtual std::vector<ControlResult> lookup_batch(const std::vector<std::uint64_t>& keys) = 0;
+    virtual MutationDecision decide_mutation(const MutationRequest& request) = 0;
+    virtual void submit_lookup_batch(const std::vector<std::uint64_t>& keys) = 0;
+    virtual void drain() = 0;
     virtual IndexStats get_stats() const = 0;
+    virtual ControlPlaneStats get_control_plane_stats() const = 0;
     virtual void enable_profiling(bool enabled) = 0;
     virtual IGPUIndex* index() = 0;
 };
