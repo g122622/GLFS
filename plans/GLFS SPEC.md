@@ -11,14 +11,16 @@
 GAMA accelerates metadata-heavy filesystem operations by moving metadata control logic to GPU and keeping CPU as a thin FUSE ingress layer.
 
 ### Primary objective
-- Accelerate `stat/getattr`, `readdir`, and metadata mutation paths.
-- Make GPU the owner of metadata lookup, scheduling, batching, and mutation decisions.
+- Accelerate `stat/getattr`, `readdir`, `open`, and `read` paths.
+- Make the filesystem read-only: all mutation-oriented syscalls must fail with `-EROFS`.
+- Make GPU the owner of metadata lookup, scheduling, batching, and read-path decisions.
 - Keep the CPU layer limited to request marshaling, result return, and fallback enforcement.
-- Use an ext4 backing root in usable mode for durable content and explicit fallback.
+- Use an ext4 backing root in usable mode only as a read-only data anchor and explicit fallback.
 
 ### Non-goals
 - GAMA is not a full replacement filesystem.
 - GAMA does not replace ext4 durability.
+- GAMA does not support in-place mutation of namespace or file contents.
 - GAMA does not require a new on-disk format.
 - GAMA does not promise zero-CPU syscalls.
 
@@ -60,7 +62,7 @@ flowchart TB
 ### Design rule
 - CPU thin shim only packages and returns.
 - GPU owns metadata state and dispatch policy.
-- ext4 backing root is only a fallback/data anchor in usable mode.
+- ext4 backing root is only a read-only fallback/data anchor in usable mode.
 
 ---
 
@@ -217,15 +219,9 @@ struct GPULearnedFS {
   - `gpufs_getattr`
   - `gpufs_readdir`
   - `gpufs_open`
-  - `gpufs_create`
-  - `gpufs_unlink`
-  - `gpufs_mkdir`
-  - `gpufs_rmdir`
-  - `gpufs_rename`
-  - `gpufs_truncate`
   - `gpufs_read`
-  - `gpufs_write`
-  - `gpufs_utimens`
+  - `gpufs_utimens` (must return `-EROFS` when used as a mutation guard)
+- mutation callbacks, when compiled, must be hard-disabled by macro and return `-EROFS`
 - `build_fuse_operations()` returns a valid `fuse_operations`
 - `set_active_fs()` installs the current runtime state
 
@@ -235,8 +231,8 @@ struct GPULearnedFS {
   - path arguments are relative to mount root or normalized by the shim
 - **Post-condition**
   - `getattr`/`readdir` expose consistent directory metadata
-  - create/mkdir/unlink/rmdir/rename/truncate/write update runtime state
-  - usable mode may fallback to ext4 backing root when accelerator misses
+  - read-only paths may fallback to ext4 backing root when accelerator misses
+  - any create/mkdir/unlink/rmdir/rename/truncate/write request returns `-EROFS`
 - **Invariant**
   - strict miss never consults backing root
   - directory child mapping remains consistent with node table
@@ -290,28 +286,15 @@ struct GPULearnedFS {
 - missing directory returns `-ENOENT`
 - non-directory path returns `-ENOTDIR`
 
-### 5.3 `create` / `mkdir`
-- parent must exist and be a directory
-- duplicate target returns `-EEXIST`
-- new inode allocated from runtime state
-- children mapping updated atomically with node table
+### 5.3 Mutation requests
+- create/mkdir/unlink/rmdir/rename/truncate/write are not supported
+- any mutation attempt returns `-EROFS`
+- the runtime state and backing root must remain unchanged after rejection
 
-### 5.4 `unlink` / `rmdir`
-- non-existing target returns `-ENOENT`
-- unlink on directory returns `-ENOENT` or `-EISDIR` depending on implementation path; final code should standardize this
-- `rmdir` on non-empty directory returns `-ENOTEMPTY`
-
-### 5.5 `rename`
-- source must exist
-- target parent must exist
-- target existing path handling must be explicit
-- directory subtree move must preserve child mapping consistency
-
-### 5.6 `truncate` / `read` / `write`
+### 5.4 `read`
 - file only; directory access returns `-EISDIR`
 - negative offsets return `-EINVAL`
-- write extends size as needed
-- truncate shrinks or grows the byte buffer
+- read returns the available bytes without side effects
 
 ---
 
@@ -361,7 +344,7 @@ sequenceDiagram
     VFS-->>App: names
 ```
 
-### 6.3 `write` mutation path
+### 6.3 mutation rejection path
 
 ```mermaid
 sequenceDiagram
@@ -369,18 +352,9 @@ sequenceDiagram
     participant VFS as Linux VFS
     participant Shim as CPU thin shim
     participant GPU as GPU control plane
-    participant EXT4 as ext4 backing root
-
-    App->>VFS: write(file, buf)
-    VFS->>Shim: write callback
-    Shim->>GPU: request mutation decision
-    alt accelerator owns write
-        GPU-->>Shim: accepted
-    else usable fallback
-        Shim->>EXT4: write delegation
-        EXT4-->>Shim: bytes written
-    end
-    Shim-->>VFS: result
+    App->>VFS: write/create/rename/unlink/mkdir/truncate
+    VFS->>Shim: mutation callback
+    Shim-->>VFS: -EROFS
 ```
 
 ---
@@ -391,7 +365,8 @@ sequenceDiagram
 - request path normalization errors return `-EINVAL`
 - strict mode must not mask misses with fallback
 - usable mode fallback must be observable in trace logs
-- partial state updates are not acceptable inside a single mutation callback
+- mutation syscalls must fail fast with `-EROFS`
+- partial state updates are not acceptable because mutation callbacks do not mutate state
 
 ---
 
@@ -401,7 +376,7 @@ sequenceDiagram
 - parse config
 - install active runtime state
 - host FUSE callbacks
-- submit request to GPU control plane abstraction
+- reject unsupported mutation syscalls with `-EROFS`
 - enforce strict/usable mode
 - return syscall-compatible errors
 
@@ -409,12 +384,10 @@ sequenceDiagram
 - maintain metadata tables
 - resolve path keys
 - schedule and batch lookups
-- decide mutation acceptance
 - provide stats for tracing and benchmarks
 
 ### ext4 backing root responsibilities
-- durable store in usable mode
-- fallback data source for lookup and file mutations
+- read-only fallback data source in usable mode
 - does not replace GPU metadata ownership
 
 ---
@@ -425,6 +398,7 @@ The spec is acceptable when all of the following hold:
 - it describes a metadata accelerator, not a full filesystem
 - modules have explicit rely/guarantee boundaries
 - strict and usable semantics are disjoint and testable
+- mutation syscalls consistently fail with `-EROFS`
 - CPU/GPU responsibilities are clearly separated
 - sequence diagrams cover lookup and mutation paths
 - benchmark scenarios match the implementation plan
@@ -433,10 +407,10 @@ The spec is acceptable when all of the following hold:
 
 ## 10. Summary
 
-GAMA is a GPU-assisted metadata accelerator for ext4-like filesystems.
+GAMA is a GPU-assisted **read-only** metadata accelerator for ext4-like filesystems.
 
 The implementation target is:
 - GPU-owned metadata control plane
 - CPU thin shim for FUSE ingress
-- ext4 backing root in usable mode
+- ext4 backing root in usable mode as a read-only fallback
 - throughput-first validation on metadata-heavy workloads

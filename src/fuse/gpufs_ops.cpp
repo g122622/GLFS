@@ -10,6 +10,16 @@
 #include "utils/perfetto_integration.h"
 #include "utils/timer.h"
 
+#ifndef GLFS_READ_ONLY_FS
+#define GLFS_READ_ONLY_FS 0
+#endif
+
+#if GLFS_READ_ONLY_FS
+#define GLFS_READ_ONLY_RETURN() return -EROFS
+#else
+#define GLFS_READ_ONLY_RETURN() do { } while (0)
+#endif
+
 namespace glfs {
 
 namespace {
@@ -478,6 +488,7 @@ int gpufs_open(const char* path, struct fuse_file_info*) {
 }
 
 int gpufs_create(const char* path, mode_t mode, struct fuse_file_info* fi) {
+    GLFS_READ_ONLY_RETURN();
     GPULearnedFS* fs = active_fs_storage();
     if (!fs || !path) {
         return -EIO;
@@ -542,6 +553,7 @@ int gpufs_create(const char* path, mode_t mode, struct fuse_file_info* fi) {
 }
 
 int gpufs_unlink(const char* path) {
+    GLFS_READ_ONLY_RETURN();
     GPULearnedFS* fs = active_fs_storage();
     if (!fs || !path) {
         return -EIO;
@@ -602,6 +614,7 @@ int gpufs_unlink(const char* path) {
 }
 
 int gpufs_mkdir(const char* path, mode_t mode) {
+    GLFS_READ_ONLY_RETURN();
     GPULearnedFS* fs = active_fs_storage();
     if (!fs || !path) {
         return -EIO;
@@ -664,6 +677,7 @@ int gpufs_mkdir(const char* path, mode_t mode) {
 }
 
 int gpufs_rename(const char* from, const char* to, unsigned int flags) {
+    GLFS_READ_ONLY_RETURN();
     GPULearnedFS* fs = active_fs_storage();
     if (!fs || !from || !to) {
         return -EIO;
@@ -753,6 +767,7 @@ int gpufs_rename(const char* from, const char* to, unsigned int flags) {
 }
 
 int gpufs_truncate(const char* path, off_t size, struct fuse_file_info*) {
+    GLFS_READ_ONLY_RETURN();
     if (size < 0) {
         return -EINVAL;
     }
@@ -849,6 +864,7 @@ int gpufs_read(const char* path, char* buf, size_t size, off_t offset, struct fu
 }
 
 int gpufs_write(const char* path, const char* buf, size_t size, off_t offset, struct fuse_file_info*) {
+    GLFS_READ_ONLY_RETURN();
     if (offset < 0) {
         return -EINVAL;
     }
@@ -894,6 +910,7 @@ int gpufs_write(const char* path, const char* buf, size_t size, off_t offset, st
 }
 
 int gpufs_utimens(const char* path, const struct timespec tv[2], struct fuse_file_info*) {
+    GLFS_READ_ONLY_RETURN();
     GPULearnedFS* fs = active_fs_storage();
     if (!fs || !path || !tv) {
         return -EIO;
@@ -911,6 +928,7 @@ int gpufs_utimens(const char* path, const struct timespec tv[2], struct fuse_fil
 }
 
 int gpufs_rmdir(const char* path) {
+    GLFS_READ_ONLY_RETURN();
     GPULearnedFS* fs = active_fs_storage();
     if (!fs || !path) {
         return -EIO;

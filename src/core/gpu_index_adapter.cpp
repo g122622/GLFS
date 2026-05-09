@@ -6,6 +6,10 @@
 #include <numeric>
 #include <sstream>
 
+namespace glfs::backends::g_index {
+IGPUIndex* create_backend();
+}  // namespace glfs::backends::g_index
+
 namespace glfs {
 
 namespace {
@@ -302,7 +306,11 @@ private:
 }  // namespace
 
 IGPUIndex* create_index(const std::string& type) {
-    return new StaticMapIndex(type.empty() ? "g-index" : type);
+    const std::string normalized_type = type.empty() ? "g-index" : type;
+    if (normalized_type == "g-index") {
+        return glfs::backends::g_index::create_backend();
+    }
+    return new StaticMapIndex(normalized_type);
 }
 
 void destroy_index(IGPUIndex* index) {

@@ -4,6 +4,7 @@ project(GPULearnedFS VERSION 0.1.0 LANGUAGES CXX CUDA)
 
 option(GLFS_BUILD_TESTS "Build the GLFS self-tests" ON)
 option(GLFS_BUILD_BENCHMARKS "Build benchmark helpers" ON)
+option(GLFS_READ_ONLY_FS "Build the filesystem in read-only mode" ON)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -52,6 +53,12 @@ endif()
 target_compile_options(glfs_core PUBLIC ${FUSE3_CFLAGS_OTHER})
 target_link_directories(glfs_core PUBLIC ${FUSE3_LIBRARY_DIRS})
 target_link_libraries(glfs_core PUBLIC ${FUSE3_LIBRARIES} CUDA::cudart)
+
+if (GLFS_READ_ONLY_FS)
+    target_compile_definitions(glfs_core PUBLIC GLFS_READ_ONLY_FS=1)
+else()
+    target_compile_definitions(glfs_core PUBLIC GLFS_READ_ONLY_FS=0)
+endif()
 
 add_executable(gpufs src/main.cpp)
 target_link_libraries(gpufs PRIVATE glfs_core)
