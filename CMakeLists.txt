@@ -25,7 +25,7 @@ add_library(glfs_core
     src/core/gpu_control_plane.cu
     src/core/backend_common.cpp
     src/core/backends/rmi_cuda/backend.cpp
-    src/core/backends/g_index/backend.cpp
+    src/core/backends/g_index/backend.cu
     src/core/backends/cu_learned/backend.cpp
     src/core/backends/pgm_gpu/backend.cpp
     src/core/backends/ligpu/backend.cpp
