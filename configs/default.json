@@ -2,7 +2,7 @@
   "fs": {
     "mount_point": "/home/user/data",
     "fuse_opts": ["-o", "auto_cache"],
-    "backing_root": "/home/g122622/dev/GLFS/backing_root",
+    "backing_root": "/home/g122622/glfs_backing_root",
     "strict_mode": false
   },
   "index": {
