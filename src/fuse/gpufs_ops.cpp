@@ -263,7 +263,9 @@ void gpufs_init(GPULearnedFS& fs,
     fs.control_plane = control_plane;
     fs.path_cfg.mount_point = cfg.fs.mount_point;
     fs.mount_point = cfg.fs.mount_point;
-    fs.backing_root.set_root(cfg.fs.backing_root);
+    fs.path_cfg.mount_point = cfg.fs.mount_point;
+    fs.path_cfg.max_depth = cfg.index.path_encoding.max_depth;
+    fs.path_cfg.bits_per_level = cfg.index.path_encoding.bits_per_level;
     fs.backing_root.set_mount_point(cfg.fs.mount_point);
     fs.backing_root.set_mount_root(normalize_path(cfg.fs.mount_point));
     fs.strict_mode = cfg.fs.strict_mode;
@@ -282,9 +284,18 @@ void gpufs_init(GPULearnedFS& fs,
 
     if (fs.control_plane) {
         TrainingConfig tcfg;
-        tcfg.index_type = "g-index";
-        tcfg.sample_ratio = 1.0f;
-        fs.control_plane->initialize(tcfg.index_type);
+        tcfg.index_type = cfg.index.type;
+        tcfg.sample_ratio = cfg.index.training.sample_ratio;
+        tcfg.max_epochs = cfg.index.training.max_epochs;
+        tcfg.max_vram_mb = static_cast<std::size_t>(cfg.index.resource.max_vram_bytes / (1024ULL * 1024ULL));
+        tcfg.segment_base_width = cfg.index.backend.segment_base_width;
+        tcfg.segment_min_width = cfg.index.backend.segment_min_width;
+        tcfg.segment_max_width = cfg.index.backend.segment_max_width;
+        tcfg.segment_epoch_cap = cfg.index.backend.segment_epoch_cap;
+        tcfg.lookup_window = cfg.index.backend.lookup_window;
+        tcfg.cuda_block_size = cfg.index.backend.cuda_block_size;
+        tcfg.latency_history_limit = cfg.index.backend.latency_history_limit;
+        tcfg.vram_overhead_bytes = cfg.index.backend.vram_overhead_bytes;
         if (!keys.empty() && keys.size() == values.size()) {
             fs.control_plane->train(keys, values, tcfg);
         }

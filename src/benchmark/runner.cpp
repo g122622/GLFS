@@ -43,7 +43,7 @@ std::vector<BenchmarkResult> run_benchmarks(const std::string& mount_point, cons
     for (const auto& [scenario, rel_path] : scenarios()) {
         std::vector<double> durations;
         const std::uint32_t warmup = cfg.benchmark.warmup_iters;
-        const std::uint32_t iters = 100;
+        const std::uint32_t iters = cfg.benchmark.measure_iters;
         struct stat st{};
         for (std::uint32_t i = 0; i < warmup + iters; ++i) {
             const auto start = now_ns();

@@ -10,7 +10,8 @@ namespace glfs {
 
 class BackingRootProxy {
 public:
-    explicit BackingRootProxy(std::string root = "./backing_root");
+    BackingRootProxy() = default;
+    explicit BackingRootProxy(std::string root);
 
     const std::string& root() const;
     void set_root(std::string root);

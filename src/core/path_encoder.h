@@ -12,9 +12,9 @@ struct EncodedKey {
 };
 
 struct PathConfig {
-    std::string mount_point = "/home/user/data";
-    std::uint32_t max_depth = 32;
-    std::uint32_t bits_per_level = 8;
+    std::string mount_point;
+    std::uint32_t max_depth;
+    std::uint32_t bits_per_level;
 };
 
 std::string normalize_path(const std::string& path);

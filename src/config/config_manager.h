@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstddef>
 #include <cstdint>
 #include <stdexcept>
 #include <string>
@@ -15,28 +16,44 @@ struct FSConfig {
     struct {
         std::string mount_point;
         std::vector<std::string> fuse_opts;
-        std::string backing_root = "./backing_root";
-        bool strict_mode = false;
+        std::string backing_root;
+        bool strict_mode;
     } fs;
 
     struct {
         std::string type;
         struct {
-            float sample_ratio = 1.0f;
-            std::string key_encoding = "trie_prefix";
+            float sample_ratio;
+            std::string key_encoding;
+            std::uint32_t max_epochs;
         } training;
         struct {
-            std::uint32_t batch_size = 256;
-            bool fallback_on_miss = false;
+            std::uint32_t batch_size;
+            bool fallback_on_miss;
         } inference;
         struct {
-            std::uint64_t max_vram_bytes = 1024ULL * 1024ULL * 1024ULL;
+            std::uint64_t max_vram_bytes;
         } resource;
+        struct {
+            std::uint32_t max_depth;
+            std::uint32_t bits_per_level;
+        } path_encoding;
+        struct {
+            std::uint32_t segment_base_width;
+            std::uint32_t segment_min_width;
+            std::uint32_t segment_max_width;
+            std::uint32_t segment_epoch_cap;
+            std::uint32_t lookup_window;
+            std::uint32_t cuda_block_size;
+            std::uint32_t latency_history_limit;
+            std::uint64_t vram_overhead_bytes;
+        } backend;
     } index;
 
     struct {
-        std::uint32_t warmup_iters = 100;
-        std::vector<std::string> metrics = {"p50", "p99", "throughput"};
+        std::uint32_t warmup_iters;
+        std::uint32_t measure_iters;
+        std::vector<std::string> metrics;
     } benchmark;
 };
 

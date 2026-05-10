@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstddef>
 #include <atomic>
 #include <cstdint>
 #include <memory>
@@ -25,10 +26,18 @@ struct IndexStats {
 };
 
 struct TrainingConfig {
-    std::string index_type = "g-index";
-    float sample_ratio = 1.0f;
-    std::uint32_t max_epochs = 1;
-    std::size_t max_vram_mb = 1024;
+    std::string index_type;
+    float sample_ratio;
+    std::uint32_t max_epochs;
+    std::size_t max_vram_mb;
+    std::size_t segment_base_width;
+    std::size_t segment_min_width;
+    std::size_t segment_max_width;
+    std::size_t segment_epoch_cap;
+    std::size_t lookup_window;
+    std::size_t cuda_block_size;
+    std::size_t latency_history_limit;
+    std::size_t vram_overhead_bytes;
 };
 
 struct ControlResult {

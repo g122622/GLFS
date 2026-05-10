@@ -9,7 +9,8 @@
     "type": "g-index",
     "training": {
       "sample_ratio": 1.0,
-      "key_encoding": "trie_prefix"
+      "key_encoding": "trie_prefix",
+      "max_epochs": 1
     },
     "inference": {
       "batch_size": 256,
@@ -17,10 +18,25 @@
     },
     "resource": {
       "max_vram_bytes": 1073741824
+    },
+    "path_encoding": {
+      "max_depth": 32,
+      "bits_per_level": 8
+    },
+    "backend": {
+      "segment_base_width": 256,
+      "segment_min_width": 32,
+      "segment_max_width": 4096,
+      "segment_epoch_cap": 8,
+      "lookup_window": 32,
+      "cuda_block_size": 256,
+      "latency_history_limit": 4096,
+      "vram_overhead_bytes": 1024
     }
   },
   "benchmark": {
     "warmup_iters": 100,
+    "measure_iters": 100,
     "metrics": ["p50", "p99", "throughput"]
   }
 }

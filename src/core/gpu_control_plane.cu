@@ -75,11 +75,14 @@ class CUDAQueueControlPlane final : public IGPUControlPlane {
 public:
     void initialize(const std::string& index_type) override {
         std::lock_guard<std::mutex> lock(mutex_);
+        if (index_type.empty()) {
+            throw std::invalid_argument("index_type must not be empty");
+        }
         ensure_stream(rt_);
         if (!index_) {
             index_.reset(create_index(index_type));
         }
-        index_type_ = index_type.empty() ? "g-index" : index_type;
+        index_type_ = index_type;
     }
 
     void train(const std::vector<std::uint64_t>& keys,
@@ -242,6 +245,9 @@ private:
             switch (request.kind) {
                 case GPURequest::Kind::TrainBatch:
                     if (!index_) {
+                        if (request.cfg.index_type.empty()) {
+                            throw std::runtime_error("missing index_type for train request");
+                        }
                         index_.reset(create_index(request.cfg.index_type));
                     }
                     index_->train(request.keys, request.values, request.cfg);
@@ -268,7 +274,7 @@ private:
 
     mutable std::mutex mutex_;
     std::unique_ptr<IGPUIndex> index_;
-    std::string index_type_ = "g-index";
+    std::string index_type_;
     GPUControlPlaneRuntime& rt_ = runtime();
 };
 

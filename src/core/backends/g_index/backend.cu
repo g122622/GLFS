@@ -139,10 +139,10 @@ std::size_t choose_segment_width(std::size_t n, const TrainingConfig& cfg) {
         return 1;
     }
     const float sample = std::clamp(cfg.sample_ratio, 0.05f, 1.0f);
-    const std::size_t epochs = std::max<std::size_t>(1, cfg.max_epochs);
-    std::size_t width = static_cast<std::size_t>(std::round(256.0f / sample));
-    width /= std::min<std::size_t>(epochs, 8);
-    width = std::clamp(width, std::size_t{32}, std::size_t{4096});
+    const std::size_t epochs = std::max<std::size_t>(1, std::min<std::size_t>(cfg.max_epochs, cfg.segment_epoch_cap));
+    std::size_t width = static_cast<std::size_t>(std::round(static_cast<double>(cfg.segment_base_width) / sample));
+    width /= epochs;
+    width = std::clamp(width, cfg.segment_min_width, cfg.segment_max_width);
     return std::min(width, n);
 }
 
@@ -168,6 +168,18 @@ public:
         if (cfg.sample_ratio < 0.0f || cfg.sample_ratio > 1.0f) {
             throw std::invalid_argument("invalid sample_ratio");
         }
+        if (cfg.index_type.empty()) {
+            throw std::invalid_argument("index_type must not be empty");
+        }
+        if (cfg.segment_base_width == 0 || cfg.segment_min_width == 0 || cfg.segment_max_width == 0) {
+            throw std::invalid_argument("invalid segment width configuration");
+        }
+        if (cfg.segment_max_width < cfg.segment_min_width) {
+            throw std::invalid_argument("segment_max_width must be >= segment_min_width");
+        }
+        if (cfg.segment_epoch_cap == 0 || cfg.lookup_window == 0 || cfg.cuda_block_size == 0 || cfg.latency_history_limit == 0 || cfg.vram_overhead_bytes == 0) {
+            throw std::invalid_argument("invalid backend training configuration");
+        }
 
         std::vector<KeyValue> items;
         items.reserve(keys.size());
@@ -190,7 +202,7 @@ public:
         rebuild_segments_locked();
         upload_device_locked();
         trained_ = true;
-        vram_usage_bytes_ = host_data_.size() * sizeof(KeyValue) + host_segments_.size() * sizeof(HostSegment) + 1024;
+        vram_usage_bytes_ = host_data_.size() * sizeof(KeyValue) + host_segments_.size() * sizeof(HostSegment) + cfg_.vram_overhead_bytes;
     }
 
     std::vector<std::uint64_t> batch_lookup(const std::vector<std::uint64_t>& keys,
@@ -223,7 +235,7 @@ public:
                                        use_stream),
                        "cudaMemcpyAsync(query H2D)");
 
-            const std::size_t block = 256;
+            const std::size_t block = cfg_.cuda_block_size;
             const std::size_t grid = (keys.size() + block - 1) / block;
             batch_lookup_kernel<<<static_cast<unsigned int>(grid), static_cast<unsigned int>(block), 0, use_stream>>>(
                 d_queries,
@@ -462,7 +474,7 @@ private:
 
     void record_latency_us(double us) const {
         std::lock_guard<std::mutex> lock(latency_mutex_);
-        if (latencies_us_.size() >= 4096) {
+        if (latencies_us_.size() >= std::max<std::size_t>(1, cfg_.latency_history_limit)) {
             latencies_us_.erase(latencies_us_.begin());
         }
         latencies_us_.push_back(us);

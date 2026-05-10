@@ -37,14 +37,13 @@ struct GPULearnedFS {
     IGPUControlPlane* control_plane = nullptr;
     BackingRootProxy backing_root;
     PathConfig path_cfg;
-    std::string mount_point = "/home/user/data";
-    bool strict_mode = false;
-    bool usable_mode = true;
+    std::string mount_point;
+    bool strict_mode;
+    bool usable_mode;
     mutable std::mutex global_lock;
     std::map<std::string, NodeEntry> nodes;
     std::map<std::string, std::vector<std::string>> children;
     std::uint64_t next_inode = 1;
-    bool verbose = false;
 };
 
 void gpufs_init(GPULearnedFS& fs,

@@ -159,10 +159,13 @@ private:
 class LocalGPUControlPlane final : public IGPUControlPlane {
 public:
     void initialize(const std::string& index_type) override {
+        if (index_type.empty()) {
+            throw std::invalid_argument("index_type must not be empty");
+        }
         if (!index_) {
             index_.reset(create_index(index_type));
         }
-        index_type_ = index_type.empty() ? "g-index" : index_type;
+        index_type_ = index_type;
     }
 
     void train(const std::vector<std::uint64_t>& keys,
@@ -291,14 +294,17 @@ public:
 
 private:
     void ensure_index(const std::string& type) {
+        if (type.empty()) {
+            throw std::invalid_argument("index_type must not be empty");
+        }
         if (!index_) {
             index_.reset(create_index(type));
-            index_type_ = type.empty() ? "g-index" : type;
+            index_type_ = type;
         }
     }
 
     std::unique_ptr<IGPUIndex> index_;
-    std::string index_type_ = "g-index";
+    std::string index_type_;
     ControlPlaneStats control_stats_;
     std::vector<std::vector<std::uint64_t>> pending_batches_;
 };
@@ -306,11 +312,13 @@ private:
 }  // namespace
 
 IGPUIndex* create_index(const std::string& type) {
-    const std::string normalized_type = type.empty() ? "g-index" : type;
-    if (normalized_type == "g-index") {
+    if (type.empty()) {
+        throw std::invalid_argument("index type must not be empty");
+    }
+    if (type == "g-index") {
         return glfs::backends::g_index::create_backend();
     }
-    return new StaticMapIndex(normalized_type);
+    return new StaticMapIndex(type);
 }
 
 void destroy_index(IGPUIndex* index) {
