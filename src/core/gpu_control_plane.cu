@@ -2,10 +2,12 @@
 
 #include <cuda_runtime.h>
 
+#include <algorithm>
 #include <cstdint>
 #include <deque>
 #include <mutex>
 #include <stdexcept>
+#include <map>
 #include <utility>
 #include <vector>
 
@@ -192,6 +194,24 @@ public:
         enqueue_locked(GPURequest{GPURequest::Kind::LookupBatch, keys, {}, {}});
     }
 
+    void set_namespace(const std::map<std::string, std::vector<std::string>>& children) override {
+        std::lock_guard<std::mutex> lock(mutex_);
+        namespace_children_ = children;
+        for (auto& [_, child_list] : namespace_children_) {
+            std::sort(child_list.begin(), child_list.end());
+            child_list.erase(std::unique(child_list.begin(), child_list.end()), child_list.end());
+        }
+    }
+
+    std::vector<std::string> list_children(const std::string& path) const override {
+        std::lock_guard<std::mutex> lock(mutex_);
+        auto it = namespace_children_.find(path);
+        if (it == namespace_children_.end()) {
+            return {};
+        }
+        return it->second;
+    }
+
     void drain() override {
         std::lock_guard<std::mutex> lock(mutex_);
         ensure_stream(rt_);
@@ -276,6 +296,7 @@ private:
     std::unique_ptr<IGPUIndex> index_;
     std::string index_type_;
     GPUControlPlaneRuntime& rt_ = runtime();
+    std::map<std::string, std::vector<std::string>> namespace_children_;
 };
 
 IGPUControlPlane* create_control_plane(const std::string& type) {

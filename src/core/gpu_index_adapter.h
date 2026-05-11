@@ -3,6 +3,7 @@
 #include <cstddef>
 #include <atomic>
 #include <cstdint>
+#include <map>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -101,6 +102,8 @@ public:
     virtual MutationDecision decide_mutation(const MutationRequest& request) = 0;
     virtual void submit_lookup_batch(const std::vector<std::uint64_t>& keys) = 0;
     virtual void drain() = 0;
+    virtual void set_namespace(const std::map<std::string, std::vector<std::string>>& children) = 0;
+    virtual std::vector<std::string> list_children(const std::string& path) const = 0;
     virtual IndexStats get_stats() const = 0;
     virtual ControlPlaneStats get_control_plane_stats() const = 0;
     virtual void enable_profiling(bool enabled) = 0;

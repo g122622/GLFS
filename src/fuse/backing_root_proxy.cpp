@@ -5,6 +5,8 @@
 #include <filesystem>
 #include <fstream>
 #include <system_error>
+#include <fcntl.h>
+#include <unistd.h>
 
 namespace glfs {
 
@@ -168,16 +170,17 @@ int BackingRootProxy::read(const std::string& absolute_path, char* buf, size_t s
         return -EINVAL;
     }
     const auto resolved = resolve(absolute_path);
-    std::ifstream in(resolved, std::ios::binary);
-    if (!in) {
+    const int fd = ::open(resolved.c_str(), O_RDONLY | O_CLOEXEC);
+    if (fd < 0) {
         return -ENOENT;
     }
-    in.seekg(offset, std::ios::beg);
-    if (!in) {
-        return -EINVAL;
+    const auto n = ::pread(fd, buf, size, offset);
+    const int saved_errno = errno;
+    ::close(fd);
+    if (n < 0) {
+        return -saved_errno;
     }
-    in.read(buf, static_cast<std::streamsize>(size));
-    return static_cast<int>(in.gcount());
+    return static_cast<int>(n);
 }
 
 int BackingRootProxy::write(const std::string& absolute_path, const char* buf, size_t size, off_t offset) const {
