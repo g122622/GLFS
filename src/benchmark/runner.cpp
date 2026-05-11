@@ -1,6 +1,7 @@
 #include "benchmark/runner.h"
 
 #include <algorithm>
+#include <csignal>
 #include <filesystem>
 #include <fstream>
 #include <functional>
@@ -18,6 +19,14 @@ namespace glfs {
 
 namespace {
 
+volatile std::sig_atomic_t g_benchmark_stop_requested = 0;
+
+void throw_if_stopped() {
+    if (g_benchmark_stop_requested != 0) {
+        throw std::runtime_error("benchmark interrupted");
+    }
+}
+
 double percentile(std::vector<double> values, double p) {
     if (values.empty()) {
         return 0.0;
@@ -33,6 +42,7 @@ std::vector<double> measure_us(std::uint32_t warmup_iters,
     std::vector<double> durations;
     durations.reserve(measure_iters);
     for (std::uint32_t i = 0; i < warmup_iters + measure_iters; ++i) {
+        throw_if_stopped();
         const auto start = now_ns();
         op();
         const auto dur = static_cast<double>(now_ns() - start) / 1000.0;
@@ -103,6 +113,7 @@ std::vector<BenchmarkTreeEntry> collect_tree(const std::filesystem::path& root) 
 
     std::vector<BenchmarkTreeEntry> entries;
     for (std::filesystem::recursive_directory_iterator it(root, ec), end; it != end && !ec; it.increment(ec)) {
+        throw_if_stopped();
         entries.push_back(BenchmarkTreeEntry{it->path(), it->is_directory(ec)});
     }
     if (ec) {
@@ -126,6 +137,7 @@ std::vector<BenchmarkResult> run_filesystem_backend(const FSConfig& cfg,
     const std::size_t progress_step = std::max<std::size_t>(1, tree.size() / 20);
 
     for (std::size_t index = 0; index < tree.size(); ++index) {
+        throw_if_stopped();
         const auto& entry = tree[index];
         const std::string rel_path = workload_relative(cfg.fs.backing_root, entry.path);
         const auto abs_path = resolve_workload_path(root, rel_path);
@@ -188,6 +200,7 @@ std::vector<BenchmarkTreeEntry> collect_benchmark_tree(const std::filesystem::pa
 }
 
 std::vector<BenchmarkResult> run_benchmarks(const FSConfig& cfg) {
+    throw_if_stopped();
     if (cfg.benchmark.report_csv_path.empty()) {
         throw std::runtime_error("missing benchmark.report_csv_path");
     }
@@ -207,6 +220,18 @@ std::vector<BenchmarkResult> run_benchmarks(const FSConfig& cfg) {
     perfetto_flush();
     std::cerr << "[benchmark] collected " << results.size() << " result rows\n";
     return results;
+}
+
+void request_benchmark_stop() {
+    g_benchmark_stop_requested = 1;
+}
+
+void reset_benchmark_stop() {
+    g_benchmark_stop_requested = 0;
+}
+
+bool benchmark_stop_requested() {
+    return g_benchmark_stop_requested != 0;
 }
 
 void write_benchmark_report_csv(const std::string& csv_path, const std::vector<BenchmarkResult>& results) {

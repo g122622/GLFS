@@ -1,3 +1,4 @@
+#include <csignal>
 #include <iostream>
 #include <filesystem>
 #include <memory>
@@ -9,8 +10,37 @@
 #include "core/gpu_index_adapter.h"
 #include "fuse/gpufs_ops.h"
 
+namespace {
+
+volatile std::sig_atomic_t g_shutdown_requested = 0;
+struct fuse* g_fuse_handle = nullptr;
+
+void signal_handler(int) {
+    g_shutdown_requested = 1;
+    if (g_fuse_handle) {
+        fuse_exit(g_fuse_handle);
+    }
+}
+
+void install_signal_handlers() {
+    std::signal(SIGINT, signal_handler);
+    std::signal(SIGTERM, signal_handler);
+}
+
+void release_resources(glfs::IGPUControlPlane* control_plane, glfs::GPULearnedFS* fs) {
+    if (fs) {
+        glfs::set_active_fs(nullptr);
+    }
+    if (control_plane) {
+        glfs::destroy_control_plane(control_plane);
+    }
+}
+
+}  // namespace
+
 int main(int argc, char** argv) {
     try {
+        install_signal_handlers();
         std::string config_path;
 
         for (int i = 1; i < argc; ++i) {
@@ -69,7 +99,39 @@ int main(int argc, char** argv) {
 
         std::cout << "mounting...\n";
         auto ops = glfs::build_fuse_operations();
-        int ret = fuse_main(static_cast<int>(fuse_args.size()), fuse_args.data(), &ops, nullptr);
+        int ret = 0;
+        try {
+            struct fuse_args fargs = FUSE_ARGS_INIT(static_cast<int>(fuse_args.size()), fuse_args.data());
+            g_fuse_handle = fuse_new(&fargs, &ops, sizeof(ops), nullptr);
+            if (!g_fuse_handle) {
+                fuse_opt_free_args(&fargs);
+                throw std::runtime_error("failed to create FUSE instance");
+            }
+            if (fuse_mount(g_fuse_handle, cfg.fs.mount_point.c_str()) != 0) {
+                fuse_opt_free_args(&fargs);
+                fuse_destroy(g_fuse_handle);
+                g_fuse_handle = nullptr;
+                throw std::runtime_error("failed to mount FUSE filesystem");
+            }
+            ret = fuse_loop(g_fuse_handle);
+            fuse_opt_free_args(&fargs);
+        } catch (...) {
+            if (g_fuse_handle) {
+                fuse_unmount(g_fuse_handle);
+                fuse_destroy(g_fuse_handle);
+                g_fuse_handle = nullptr;
+            }
+            release_resources(control_plane.release(), &fs);
+            throw;
+        }
+
+        if (g_fuse_handle) {
+            fuse_unmount(g_fuse_handle);
+            fuse_destroy(g_fuse_handle);
+            g_fuse_handle = nullptr;
+        }
+
+        release_resources(control_plane.release(), &fs);
         return ret == 0 ? 0 : 1;
     } catch (const std::exception& ex) {
         std::cerr << "fatal: " << ex.what() << '\n';

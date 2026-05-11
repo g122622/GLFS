@@ -28,5 +28,8 @@ struct BenchmarkTreeEntry {
 std::vector<BenchmarkTreeEntry> collect_benchmark_tree(const std::filesystem::path& root);
 std::vector<BenchmarkResult> run_benchmarks(const FSConfig& cfg);
 void write_benchmark_report_csv(const std::string& csv_path, const std::vector<BenchmarkResult>& results);
+void request_benchmark_stop();
+void reset_benchmark_stop();
+bool benchmark_stop_requested();
 
 }  // namespace glfs

@@ -1,4 +1,5 @@
 #include <chrono>
+#include <csignal>
 #include <cstdlib>
 #include <filesystem>
 #include <iostream>
@@ -17,6 +18,24 @@
 #include "config/config_manager.h"
 
 namespace {
+
+volatile std::sig_atomic_t g_interrupted = 0;
+
+void signal_handler(int) {
+    g_interrupted = 1;
+    glfs::request_benchmark_stop();
+}
+
+void install_signal_handlers() {
+    std::signal(SIGINT, signal_handler);
+    std::signal(SIGTERM, signal_handler);
+}
+
+void ensure_not_interrupted() {
+    if (g_interrupted != 0 || glfs::benchmark_stop_requested()) {
+        throw std::runtime_error("benchmark interrupted");
+    }
+}
 
 bool is_fuse_mounted(const std::filesystem::path& path) {
     struct statfs sfs {};
@@ -48,6 +67,7 @@ void wait_for_mount(const std::filesystem::path& path,
                     std::uint32_t poll_interval_ms) {
     const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms);
     while (std::chrono::steady_clock::now() < deadline) {
+        ensure_not_interrupted();
         int status = 0;
         const auto waited = ::waitpid(daemon_pid, &status, WNOHANG);
         if (waited == daemon_pid) {
@@ -70,6 +90,9 @@ void wait_for_mount(const std::filesystem::path& path,
 void wait_for_process_exit(pid_t pid, std::uint32_t timeout_ms, std::uint32_t poll_interval_ms) {
     const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms);
     while (std::chrono::steady_clock::now() < deadline) {
+        if (g_interrupted != 0) {
+            break;
+        }
         int status = 0;
         const auto waited = ::waitpid(pid, &status, WNOHANG);
         if (waited == pid) {
@@ -92,16 +115,33 @@ pid_t launch_mount_daemon(const std::filesystem::path& daemon_exe, const std::st
         throw std::runtime_error("failed to fork mount daemon process");
     }
     if (pid == 0) {
+        (void)::setpgid(0, 0);
         ::execl(daemon_exe.c_str(), daemon_exe.c_str(), "--config", config_path.c_str(), static_cast<char*>(nullptr));
         ::_exit(127);
     }
+    (void)::setpgid(pid, pid);
     return pid;
+}
+
+void terminate_daemon(pid_t pid, std::uint32_t timeout_ms, std::uint32_t poll_interval_ms) {
+    if (pid <= 0) {
+        return;
+    }
+    (void)::kill(pid, SIGTERM);
+    wait_for_process_exit(pid, timeout_ms, poll_interval_ms);
+    if (::kill(pid, 0) == 0) {
+        (void)::kill(pid, SIGKILL);
+        (void)::waitpid(pid, nullptr, 0);
+    }
 }
 
 }  // namespace
 
 int main(int argc, char** argv) {
     try {
+        install_signal_handlers();
+        glfs::reset_benchmark_stop();
+
         if (argc != 3 || std::string(argv[1]) != "--config") {
             std::cerr << "usage: glfs_benchmark --config FILE\n";
             return 1;
@@ -115,6 +155,8 @@ int main(int argc, char** argv) {
         try {
             wait_for_mount(cfg.fs.mount_point, daemon_pid, cfg.benchmark.mount_wait_timeout_ms, cfg.benchmark.mount_poll_interval_ms);
 
+            ensure_not_interrupted();
+
             const auto results = glfs::run_benchmarks(cfg);
             glfs::write_benchmark_report_csv(cfg.benchmark.report_csv_path, results);
 
@@ -124,11 +166,11 @@ int main(int argc, char** argv) {
                 unmount_path(cfg.fs.mount_point);
             } catch (...) {
             }
-            wait_for_process_exit(daemon_pid, cfg.benchmark.daemon_stop_timeout_ms, cfg.benchmark.mount_poll_interval_ms);
+            terminate_daemon(daemon_pid, cfg.benchmark.daemon_stop_timeout_ms, cfg.benchmark.mount_poll_interval_ms);
             throw;
         }
 
-        wait_for_process_exit(daemon_pid, cfg.benchmark.daemon_stop_timeout_ms, cfg.benchmark.mount_poll_interval_ms);
+        terminate_daemon(daemon_pid, cfg.benchmark.daemon_stop_timeout_ms, cfg.benchmark.mount_poll_interval_ms);
 
         return 0;
     } catch (const std::exception& ex) {
