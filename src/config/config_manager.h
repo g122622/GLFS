@@ -53,6 +53,17 @@ struct FSConfig {
     struct {
         std::uint32_t warmup_iters;
         std::uint32_t measure_iters;
+        std::uint32_t read_size_bytes;
+        std::string report_csv_path;
+        std::string report_plot_path;
+        struct {
+            std::string traversal_latency_path;
+            std::string resource_summary_path;
+        } report_plot_paths;
+        std::string mode;
+        std::uint32_t mount_wait_timeout_ms;
+        std::uint32_t mount_poll_interval_ms;
+        std::uint32_t daemon_stop_timeout_ms;
         std::vector<std::string> metrics;
     } benchmark;
 };

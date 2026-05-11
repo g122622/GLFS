@@ -1,6 +1,6 @@
 {
   "fs": {
-    "mount_point": "/home/user/data",
+    "mount_point": "/home/g122622/glfs_mount_point",
     "fuse_opts": ["-o", "auto_cache"],
     "backing_root": "/home/g122622/glfs_backing_root",
     "strict_mode": false
@@ -37,6 +37,17 @@
   "benchmark": {
     "warmup_iters": 100,
     "measure_iters": 100,
+    "read_size_bytes": 1,
+    "report_csv_path": "/home/g122622/dev/GLFS/benchmark_report.csv",
+    "report_plot_path": "/home/g122622/dev/GLFS/benchmark_report.png",
+    "report_plot_paths": {
+      "traversal_latency_path": "/home/g122622/dev/GLFS/benchmark_report_traversal_latency.png",
+      "resource_summary_path": "/home/g122622/dev/GLFS/benchmark_report_resources.png"
+    },
+    "mode": "dual_compare",
+    "mount_wait_timeout_ms": 30000,
+    "mount_poll_interval_ms": 50,
+    "daemon_stop_timeout_ms": 5000,
     "metrics": ["p50", "p99", "throughput"]
   }
 }

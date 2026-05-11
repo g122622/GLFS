@@ -34,9 +34,8 @@
 2. `src/fuse/gpufs_ops.cpp`
 3. `src/fuse/client_api.cpp` / `.h`
 4. `src/config/config_manager.h` / `.cpp`
-5. `src/main.cpp`
-6. `src/core/gpu_index_adapter.h` / `.cpp`
-7. `CMakeLists.txt`
+5. `src/core/gpu_index_adapter.h` / `.cpp`
+6. `CMakeLists.txt`
 
 ---
 

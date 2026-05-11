@@ -1,5 +1,6 @@
 #pragma once
 
+#include <filesystem>
 #include <string>
 #include <vector>
 
@@ -9,7 +10,9 @@
 namespace glfs {
 
 struct BenchmarkResult {
-    std::string scenario;
+     std::string backend;
+    std::string operation;
+    std::string path;
     double p50_us = 0.0;
     double p99_us = 0.0;
     double p999_us = 0.0;
@@ -17,6 +20,13 @@ struct BenchmarkResult {
     IndexStats index_stats;
 };
 
-std::vector<BenchmarkResult> run_benchmarks(const std::string& mount_point, const FSConfig& cfg);
+struct BenchmarkTreeEntry {
+    std::filesystem::path path;
+    bool is_dir = false;
+};
+
+std::vector<BenchmarkTreeEntry> collect_benchmark_tree(const std::filesystem::path& root);
+std::vector<BenchmarkResult> run_benchmarks(const FSConfig& cfg);
+void write_benchmark_report_csv(const std::string& csv_path, const std::vector<BenchmarkResult>& results);
 
 }  // namespace glfs

@@ -14,24 +14,21 @@ cmake --build build -j$(nproc)
 ### 2. 挂载
 
 ```bash
-./scripts/mount.sh
+./build/gpufs --config ./configs/default.json
 ```
 
-默认挂载点：`/home/user/data`
-默认 backing root：`./backing_root`
+默认挂载点与 backing root 由 `configs/default.json` 决定。
 
-### 3. 卸载
+### 3. 基准测试
 
 ```bash
-./scripts/umount.sh /home/user/data
+./build/glfs_benchmark --config ./configs/default.json
 ```
 
 ## 运行参数
 
-- `--config FILE`：配置文件路径
-- `--mount DIR`：挂载目录
-- `--background`：不强制前台模式
-- 其余参数会原样传给 FUSE
+- `gpufs` 仅接受 `--config FILE`
+- `glfs_benchmark` 仅接受 `--config FILE`
 
 ## 当前支持的原型语义
 
@@ -58,4 +55,4 @@ cmake --build build -j$(nproc)
 
 - 避免把数据放在 `/mnt/c`
 - 需要安装 `libfuse3-dev`
-- 挂载时建议先确认 `fusermount3` 可用
+- 挂载和卸载由 `glfs_benchmark` 自动协调

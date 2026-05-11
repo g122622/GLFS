@@ -60,8 +60,13 @@ else()
     target_compile_definitions(glfs_core PUBLIC GLFS_READ_ONLY_FS=0)
 endif()
 
-add_executable(gpufs src/main.cpp)
+add_executable(gpufs src/benchmark/mount_daemon_main.cpp)
 target_link_libraries(gpufs PRIVATE glfs_core)
+
+if (GLFS_BUILD_BENCHMARKS)
+    add_executable(glfs_benchmark src/benchmark/driver_main.cpp)
+    target_link_libraries(glfs_benchmark PRIVATE glfs_core)
+endif()
 
 if (GLFS_BUILD_TESTS)
     enable_testing()

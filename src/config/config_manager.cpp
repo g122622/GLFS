@@ -167,6 +167,16 @@ FSConfig load_config(const std::string& filepath) {
     const auto& benchmark = require_section(root, "benchmark", "benchmark");
     cfg.benchmark.warmup_iters = require_u32(benchmark, "warmup_iters", "benchmark.warmup_iters");
     cfg.benchmark.measure_iters = require_u32(benchmark, "measure_iters", "benchmark.measure_iters");
+    cfg.benchmark.read_size_bytes = require_u32(benchmark, "read_size_bytes", "benchmark.read_size_bytes");
+    cfg.benchmark.report_csv_path = require_string(benchmark, "report_csv_path", "benchmark.report_csv_path");
+    cfg.benchmark.report_plot_path = require_string(benchmark, "report_plot_path", "benchmark.report_plot_path");
+    const auto& report_plot_paths = require_section(benchmark, "report_plot_paths", "benchmark.report_plot_paths");
+    cfg.benchmark.report_plot_paths.traversal_latency_path = require_string(report_plot_paths, "traversal_latency_path", "benchmark.report_plot_paths.traversal_latency_path");
+    cfg.benchmark.report_plot_paths.resource_summary_path = require_string(report_plot_paths, "resource_summary_path", "benchmark.report_plot_paths.resource_summary_path");
+    cfg.benchmark.mode = require_string(benchmark, "mode", "benchmark.mode");
+    cfg.benchmark.mount_wait_timeout_ms = require_u32(benchmark, "mount_wait_timeout_ms", "benchmark.mount_wait_timeout_ms");
+    cfg.benchmark.mount_poll_interval_ms = require_u32(benchmark, "mount_poll_interval_ms", "benchmark.mount_poll_interval_ms");
+    cfg.benchmark.daemon_stop_timeout_ms = require_u32(benchmark, "daemon_stop_timeout_ms", "benchmark.daemon_stop_timeout_ms");
     cfg.benchmark.metrics = require_string_array(benchmark, "metrics", "benchmark.metrics");
 
     validate_config(cfg);
@@ -236,6 +246,33 @@ void validate_config(const FSConfig& cfg) {
     }
     if (cfg.benchmark.measure_iters == 0) {
         throw ValidationError("benchmark.measure_iters must be > 0");
+    }
+    if (cfg.benchmark.read_size_bytes == 0) {
+        throw ValidationError("benchmark.read_size_bytes must be > 0");
+    }
+    if (cfg.benchmark.report_csv_path.empty()) {
+        throw ValidationError("missing: benchmark.report_csv_path");
+    }
+    if (cfg.benchmark.report_plot_path.empty()) {
+        throw ValidationError("missing: benchmark.report_plot_path");
+    }
+    if (cfg.benchmark.report_plot_paths.traversal_latency_path.empty()) {
+        throw ValidationError("missing: benchmark.report_plot_paths.traversal_latency_path");
+    }
+    if (cfg.benchmark.report_plot_paths.resource_summary_path.empty()) {
+        throw ValidationError("missing: benchmark.report_plot_paths.resource_summary_path");
+    }
+    if (cfg.benchmark.mode != "dual_compare") {
+        throw ValidationError("benchmark.mode must be dual_compare");
+    }
+    if (cfg.benchmark.mount_wait_timeout_ms == 0) {
+        throw ValidationError("benchmark.mount_wait_timeout_ms must be > 0");
+    }
+    if (cfg.benchmark.mount_poll_interval_ms == 0) {
+        throw ValidationError("benchmark.mount_poll_interval_ms must be > 0");
+    }
+    if (cfg.benchmark.daemon_stop_timeout_ms == 0) {
+        throw ValidationError("benchmark.daemon_stop_timeout_ms must be > 0");
     }
     if (cfg.benchmark.metrics.empty()) {
         throw ValidationError("benchmark.metrics must not be empty");

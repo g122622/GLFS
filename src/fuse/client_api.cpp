@@ -1,6 +1,7 @@
 #include "fuse/client_api.h"
 
 #include <cerrno>
+#include <cstddef>
 
 namespace glfs {
 
@@ -33,6 +34,30 @@ int fuse_client_readdir(const char* mount_point, const char* rel_path, void* buf
         return -EIO;
     }
     return gpufs_readdir(rel_path, buf, filler ? filler : noop_filler, 0, nullptr, static_cast<enum fuse_readdir_flags>(0));
+}
+
+int fuse_client_open(const char* mount_point, const char* rel_path) {
+    if (!mount_point || !rel_path) {
+        return -EINVAL;
+    }
+    GPULearnedFS* fs = glfs::active_fs();
+    if (!fs) {
+        return -EIO;
+    }
+    (void)mount_point;
+    return gpufs_open(rel_path, nullptr);
+}
+
+int fuse_client_read(const char* mount_point, const char* rel_path, char* buf, size_t size, off_t offset) {
+    if (!mount_point || !rel_path || !buf) {
+        return -EINVAL;
+    }
+    GPULearnedFS* fs = glfs::active_fs();
+    if (!fs) {
+        return -EIO;
+    }
+    (void)mount_point;
+    return gpufs_read(rel_path, buf, size, offset, nullptr);
 }
 
 }  // namespace glfs

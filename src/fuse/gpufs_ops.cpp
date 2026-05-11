@@ -261,6 +261,7 @@ void gpufs_init(GPULearnedFS& fs,
                 IGPUControlPlane* control_plane,
                 const FSConfig& cfg) {
     fs.control_plane = control_plane;
+    fs.backing_root.set_root(cfg.fs.backing_root);
     fs.path_cfg.mount_point = cfg.fs.mount_point;
     fs.mount_point = cfg.fs.mount_point;
     fs.path_cfg.mount_point = cfg.fs.mount_point;
