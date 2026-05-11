@@ -15,6 +15,8 @@
 
 #include <cuda_runtime.h>
 
+#include "utils/perfetto_integration.h"
+
 namespace glfs::backends::g_index {
 
 namespace {
@@ -159,54 +161,74 @@ public:
     void train(const std::vector<std::uint64_t>& keys,
                const std::vector<std::uint64_t>& values,
                const TrainingConfig& cfg) override {
-        if (keys.size() != values.size()) {
-            throw std::invalid_argument("keys and values size mismatch");
-        }
-        if (keys.empty()) {
-            throw std::invalid_argument("training data must not be empty");
-        }
-        if (cfg.sample_ratio < 0.0f || cfg.sample_ratio > 1.0f) {
-            throw std::invalid_argument("invalid sample_ratio");
-        }
-        if (cfg.index_type.empty()) {
-            throw std::invalid_argument("index_type must not be empty");
-        }
-        if (cfg.segment_base_width == 0 || cfg.segment_min_width == 0 || cfg.segment_max_width == 0) {
-            throw std::invalid_argument("invalid segment width configuration");
-        }
-        if (cfg.segment_max_width < cfg.segment_min_width) {
-            throw std::invalid_argument("segment_max_width must be >= segment_min_width");
-        }
-        if (cfg.segment_epoch_cap == 0 || cfg.lookup_window == 0 || cfg.cuda_block_size == 0 || cfg.latency_history_limit == 0 || cfg.vram_overhead_bytes == 0) {
-            throw std::invalid_argument("invalid backend training configuration");
+        TRACE_EVENT("glfs.lookup", "backend.g_index.train");
+        {
+            TRACE_EVENT("glfs.lookup", "backend.g_index.train_validate");
+            if (keys.size() != values.size()) {
+                throw std::invalid_argument("keys and values size mismatch");
+            }
+            if (keys.empty()) {
+                throw std::invalid_argument("training data must not be empty");
+            }
+            if (cfg.sample_ratio < 0.0f || cfg.sample_ratio > 1.0f) {
+                throw std::invalid_argument("invalid sample_ratio");
+            }
+            if (cfg.index_type.empty()) {
+                throw std::invalid_argument("index_type must not be empty");
+            }
+            if (cfg.segment_base_width == 0 || cfg.segment_min_width == 0 || cfg.segment_max_width == 0) {
+                throw std::invalid_argument("invalid segment width configuration");
+            }
+            if (cfg.segment_max_width < cfg.segment_min_width) {
+                throw std::invalid_argument("segment_max_width must be >= segment_min_width");
+            }
+            if (cfg.segment_epoch_cap == 0 || cfg.lookup_window == 0 || cfg.cuda_block_size == 0 || cfg.latency_history_limit == 0 || cfg.vram_overhead_bytes == 0) {
+                throw std::invalid_argument("invalid backend training configuration");
+            }
         }
 
         std::vector<KeyValue> items;
-        items.reserve(keys.size());
-        for (std::size_t i = 0; i < keys.size(); ++i) {
-            items.push_back(KeyValue{keys[i], values[i]});
+        {
+            TRACE_EVENT("glfs.lookup", "backend.g_index.train_materialize_pairs");
+            items.reserve(keys.size());
+            for (std::size_t i = 0; i < keys.size(); ++i) {
+                items.push_back(KeyValue{keys[i], values[i]});
+            }
         }
 
-        std::stable_sort(items.begin(), items.end(), [](const KeyValue& a, const KeyValue& b) {
-            if (a.key != b.key) {
-                return a.key < b.key;
-            }
-            return a.value < b.value;
-        });
-        items = deduplicate_sorted(std::move(items));
+        {
+            TRACE_EVENT("glfs.lookup", "backend.g_index.train_sort_pairs");
+            std::stable_sort(items.begin(), items.end(), [](const KeyValue& a, const KeyValue& b) {
+                if (a.key != b.key) {
+                    return a.key < b.key;
+                }
+                return a.value < b.value;
+            });
+        }
+        {
+            TRACE_EVENT("glfs.lookup", "backend.g_index.train_deduplicate");
+            items = deduplicate_sorted(std::move(items));
+        }
 
         std::lock_guard<std::mutex> lock(mutex_);
-        cfg_ = cfg;
-        host_data_ = std::move(items);
-        segment_width_ = choose_segment_width(host_data_.size(), cfg_);
+        {
+            TRACE_EVENT("glfs.lookup", "backend.g_index.train_commit_host_state");
+            cfg_ = cfg;
+            host_data_ = std::move(items);
+            segment_width_ = choose_segment_width(host_data_.size(), cfg_);
+        }
         rebuild_segments_locked();
         upload_device_locked();
-        trained_ = true;
-        vram_usage_bytes_ = host_data_.size() * sizeof(KeyValue) + host_segments_.size() * sizeof(HostSegment) + cfg_.vram_overhead_bytes;
+        {
+            TRACE_EVENT("glfs.lookup", "backend.g_index.train_finalize");
+            trained_ = true;
+            vram_usage_bytes_ = host_data_.size() * sizeof(KeyValue) + host_segments_.size() * sizeof(HostSegment) + cfg_.vram_overhead_bytes;
+        }
     }
 
     std::vector<std::uint64_t> batch_lookup(const std::vector<std::uint64_t>& keys,
                                             cudaStream_t stream) override {
+        TRACE_EVENT("glfs.lookup", "backend.g_index.batch_lookup");
         std::vector<std::uint64_t> out(keys.size(), INVALID_INODE);
         if (keys.empty()) {
             return out;
@@ -226,34 +248,49 @@ public:
         std::uint64_t* d_queries = nullptr;
         std::uint64_t* d_results = nullptr;
         try {
-            cuda_check(cudaMalloc(&d_queries, keys.size() * sizeof(std::uint64_t)), "cudaMalloc(d_queries)");
-            cuda_check(cudaMalloc(&d_results, out.size() * sizeof(std::uint64_t)), "cudaMalloc(d_results)");
-            cuda_check(cudaMemcpyAsync(d_queries,
-                                       keys.data(),
-                                       keys.size() * sizeof(std::uint64_t),
-                                       cudaMemcpyHostToDevice,
-                                       use_stream),
-                       "cudaMemcpyAsync(query H2D)");
+            {
+                TRACE_EVENT("glfs.lookup", "backend.g_index.cuda_alloc_temp");
+                cuda_check(cudaMalloc(&d_queries, keys.size() * sizeof(std::uint64_t)), "cudaMalloc(d_queries)");
+                cuda_check(cudaMalloc(&d_results, out.size() * sizeof(std::uint64_t)), "cudaMalloc(d_results)");
+            }
+            {
+                TRACE_EVENT("glfs.lookup", "backend.g_index.query_h2d");
+                cuda_check(cudaMemcpyAsync(d_queries,
+                                           keys.data(),
+                                           keys.size() * sizeof(std::uint64_t),
+                                           cudaMemcpyHostToDevice,
+                                           use_stream),
+                           "cudaMemcpyAsync(query H2D)");
+            }
 
             const std::size_t block = cfg_.cuda_block_size;
             const std::size_t grid = (keys.size() + block - 1) / block;
-            batch_lookup_kernel<<<static_cast<unsigned int>(grid), static_cast<unsigned int>(block), 0, use_stream>>>(
-                d_queries,
-                keys.size(),
-                d_keys_,
-                d_values_,
-                d_segments_,
-                host_segments_.size(),
-                d_results);
+            {
+                TRACE_EVENT("glfs.lookup", "backend.g_index.kernel_launch");
+                batch_lookup_kernel<<<static_cast<unsigned int>(grid), static_cast<unsigned int>(block), 0, use_stream>>>(
+                    d_queries,
+                    keys.size(),
+                    d_keys_,
+                    d_values_,
+                    d_segments_,
+                    host_segments_.size(),
+                    d_results);
+            }
             cuda_check(cudaGetLastError(), "batch_lookup_kernel launch");
 
-            cuda_check(cudaMemcpyAsync(out.data(),
-                                       d_results,
-                                       out.size() * sizeof(std::uint64_t),
-                                       cudaMemcpyDeviceToHost,
-                                       use_stream),
-                       "cudaMemcpyAsync(results D2H)");
-            cuda_check(cudaStreamSynchronize(use_stream), "cudaStreamSynchronize");
+            {
+                TRACE_EVENT("glfs.lookup", "backend.g_index.result_d2h");
+                cuda_check(cudaMemcpyAsync(out.data(),
+                                           d_results,
+                                           out.size() * sizeof(std::uint64_t),
+                                           cudaMemcpyDeviceToHost,
+                                           use_stream),
+                           "cudaMemcpyAsync(results D2H)");
+            }
+            {
+                TRACE_EVENT("glfs.lookup", "backend.g_index.stream_sync");
+                cuda_check(cudaStreamSynchronize(use_stream), "cudaStreamSynchronize");
+            }
         } catch (...) {
             if (d_queries) {
                 cudaFree(d_queries);
@@ -401,30 +438,38 @@ public:
 
 private:
     void rebuild_segments_locked() {
-        host_segments_.clear();
+        TRACE_EVENT("glfs.lookup", "backend.g_index.rebuild_segments");
+        {
+            TRACE_EVENT("glfs.lookup", "backend.g_index.rebuild_segments_clear");
+            host_segments_.clear();
+        }
         if (host_data_.empty()) {
             return;
         }
 
         const std::size_t width = std::max<std::size_t>(1, segment_width_);
-        for (std::size_t begin = 0; begin < host_data_.size(); begin += width) {
-            const std::size_t end = std::min(host_data_.size(), begin + width);
-            const auto& first = host_data_[begin];
-            const auto& last = host_data_[end - 1];
-            HostSegment seg;
-            seg.first_key = first.key;
-            seg.last_key = last.key;
-            seg.begin = begin;
-            seg.end = end;
-            seg.intercept = static_cast<double>(begin);
-            if (end > begin + 1 && last.key != first.key) {
-                seg.slope = static_cast<double>(end - begin - 1) / static_cast<double>(last.key - first.key);
+        {
+            TRACE_EVENT("glfs.lookup", "backend.g_index.rebuild_segments_generate");
+            for (std::size_t begin = 0; begin < host_data_.size(); begin += width) {
+                const std::size_t end = std::min(host_data_.size(), begin + width);
+                const auto& first = host_data_[begin];
+                const auto& last = host_data_[end - 1];
+                HostSegment seg;
+                seg.first_key = first.key;
+                seg.last_key = last.key;
+                seg.begin = begin;
+                seg.end = end;
+                seg.intercept = static_cast<double>(begin);
+                if (end > begin + 1 && last.key != first.key) {
+                    seg.slope = static_cast<double>(end - begin - 1) / static_cast<double>(last.key - first.key);
+                }
+                host_segments_.push_back(seg);
             }
-            host_segments_.push_back(seg);
         }
     }
 
     void release_device_locked() {
+        TRACE_EVENT("glfs.lookup", "backend.g_index.release_device");
         if (d_keys_) {
             cudaFree(d_keys_);
             d_keys_ = nullptr;
@@ -440,36 +485,55 @@ private:
     }
 
     void upload_device_locked() {
+        TRACE_EVENT("glfs.lookup", "backend.g_index.upload_device");
         release_device_locked();
         if (host_data_.empty()) {
             return;
         }
 
-        cuda_check(cudaMalloc(&d_keys_, host_data_.size() * sizeof(std::uint64_t)), "cudaMalloc(d_keys)");
-        cuda_check(cudaMalloc(&d_values_, host_data_.size() * sizeof(std::uint64_t)), "cudaMalloc(d_values)");
-        cuda_check(cudaMalloc(&d_segments_, host_segments_.size() * sizeof(DeviceSegment)), "cudaMalloc(d_segments)");
+        {
+            TRACE_EVENT("glfs.lookup", "backend.g_index.upload_device_alloc");
+            cuda_check(cudaMalloc(&d_keys_, host_data_.size() * sizeof(std::uint64_t)), "cudaMalloc(d_keys)");
+            cuda_check(cudaMalloc(&d_values_, host_data_.size() * sizeof(std::uint64_t)), "cudaMalloc(d_values)");
+            cuda_check(cudaMalloc(&d_segments_, host_segments_.size() * sizeof(DeviceSegment)), "cudaMalloc(d_segments)");
+        }
 
         std::vector<std::uint64_t> keys;
         std::vector<std::uint64_t> values;
-        keys.reserve(host_data_.size());
-        values.reserve(host_data_.size());
-        for (const auto& item : host_data_) {
-            keys.push_back(item.key);
-            values.push_back(item.value);
+        {
+            TRACE_EVENT("glfs.lookup", "backend.g_index.upload_device_pack_kv");
+            keys.reserve(host_data_.size());
+            values.reserve(host_data_.size());
+            for (const auto& item : host_data_) {
+                keys.push_back(item.key);
+                values.push_back(item.value);
+            }
         }
 
         std::vector<DeviceSegment> segments;
-        segments.reserve(host_segments_.size());
-        for (const auto& s : host_segments_) {
-            segments.push_back(DeviceSegment{s.first_key, s.last_key, s.begin, s.end, s.slope, s.intercept});
+        {
+            TRACE_EVENT("glfs.lookup", "backend.g_index.upload_device_pack_segments");
+            segments.reserve(host_segments_.size());
+            for (const auto& s : host_segments_) {
+                segments.push_back(DeviceSegment{s.first_key, s.last_key, s.begin, s.end, s.slope, s.intercept});
+            }
         }
 
-        cuda_check(cudaMemcpy(d_keys_, keys.data(), keys.size() * sizeof(std::uint64_t), cudaMemcpyHostToDevice),
-                   "cudaMemcpy(keys H2D)");
-        cuda_check(cudaMemcpy(d_values_, values.data(), values.size() * sizeof(std::uint64_t), cudaMemcpyHostToDevice),
-                   "cudaMemcpy(values H2D)");
-        cuda_check(cudaMemcpy(d_segments_, segments.data(), segments.size() * sizeof(DeviceSegment), cudaMemcpyHostToDevice),
-                   "cudaMemcpy(segments H2D)");
+        {
+            TRACE_EVENT("glfs.lookup", "backend.g_index.index_h2d_keys");
+            cuda_check(cudaMemcpy(d_keys_, keys.data(), keys.size() * sizeof(std::uint64_t), cudaMemcpyHostToDevice),
+                       "cudaMemcpy(keys H2D)");
+        }
+        {
+            TRACE_EVENT("glfs.lookup", "backend.g_index.index_h2d_values");
+            cuda_check(cudaMemcpy(d_values_, values.data(), values.size() * sizeof(std::uint64_t), cudaMemcpyHostToDevice),
+                       "cudaMemcpy(values H2D)");
+        }
+        {
+            TRACE_EVENT("glfs.lookup", "backend.g_index.index_h2d_segments");
+            cuda_check(cudaMemcpy(d_segments_, segments.data(), segments.size() * sizeof(DeviceSegment), cudaMemcpyHostToDevice),
+                       "cudaMemcpy(segments H2D)");
+        }
     }
 
     void record_latency_us(double us) const {

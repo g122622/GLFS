@@ -12,10 +12,12 @@
 #include <sys/statfs.h>
 #include <sys/types.h>
 #include <sys/wait.h>
+#include <poll.h>
 #include <unistd.h>
 
 #include "benchmark/runner.h"
 #include "config/config_manager.h"
+#include "utils/perfetto_integration.h"
 
 namespace {
 
@@ -24,6 +26,7 @@ volatile std::sig_atomic_t g_interrupted = 0;
 void signal_handler(int) {
     g_interrupted = 1;
     glfs::request_benchmark_stop();
+    glfs::tracing_stop_session();
 }
 
 void install_signal_handlers() {
@@ -46,6 +49,18 @@ bool is_fuse_mounted(const std::filesystem::path& path) {
 #define FUSE_SUPER_MAGIC 0x65735546
 #endif
     return static_cast<unsigned long>(sfs.f_type) == static_cast<unsigned long>(FUSE_SUPER_MAGIC);
+}
+
+bool mount_point_ready(const std::filesystem::path& path) {
+    if (!is_fuse_mounted(path)) {
+        return false;
+    }
+    std::error_code ec;
+    for (std::filesystem::directory_iterator it(path, ec), end; it != end && !ec; it.increment(ec)) {
+        (void)it->path();
+        break;
+    }
+    return !ec;
 }
 
 void unmount_path(const std::filesystem::path& path) {
@@ -79,7 +94,7 @@ void wait_for_mount(const std::filesystem::path& path,
             }
             throw std::runtime_error("mount daemon exited early");
         }
-        if (is_fuse_mounted(path)) {
+        if (mount_point_ready(path)) {
             return;
         }
         std::this_thread::sleep_for(std::chrono::milliseconds(poll_interval_ms));
@@ -105,7 +120,7 @@ void wait_for_process_exit(pid_t pid, std::uint32_t timeout_ms, std::uint32_t po
     }
 }
 
-pid_t launch_mount_daemon(const std::filesystem::path& daemon_exe, const std::string& config_path) {
+pid_t launch_mount_daemon(const std::filesystem::path& daemon_exe, const std::string& config_path, int ready_fd) {
     if (!std::filesystem::exists(daemon_exe)) {
         throw std::runtime_error("mount daemon executable not found: " + daemon_exe.string());
     }
@@ -116,7 +131,8 @@ pid_t launch_mount_daemon(const std::filesystem::path& daemon_exe, const std::st
     }
     if (pid == 0) {
         (void)::setpgid(0, 0);
-        ::execl(daemon_exe.c_str(), daemon_exe.c_str(), "--config", config_path.c_str(), static_cast<char*>(nullptr));
+        const std::string ready_fd_arg = std::to_string(ready_fd);
+        ::execl(daemon_exe.c_str(), daemon_exe.c_str(), "--config", config_path.c_str(), "--ready-fd", ready_fd_arg.c_str(), static_cast<char*>(nullptr));
         ::_exit(127);
     }
     (void)::setpgid(pid, pid);
@@ -127,11 +143,36 @@ void terminate_daemon(pid_t pid, std::uint32_t timeout_ms, std::uint32_t poll_in
     if (pid <= 0) {
         return;
     }
-    (void)::kill(pid, SIGTERM);
-    wait_for_process_exit(pid, timeout_ms, poll_interval_ms);
+    (void)::kill(-pid, SIGTERM);
+    wait_for_process_exit(pid, timeout_ms + 2000, poll_interval_ms);
     if (::kill(pid, 0) == 0) {
-        (void)::kill(pid, SIGKILL);
+        (void)::kill(-pid, SIGKILL);
         (void)::waitpid(pid, nullptr, 0);
+    }
+}
+
+void wait_for_mount_ready_fd(int fd, pid_t daemon_pid, std::uint32_t timeout_ms) {
+    struct pollfd pfd {};
+    pfd.fd = fd;
+    pfd.events = POLLIN;
+    const int rc = ::poll(&pfd, 1, static_cast<int>(timeout_ms));
+    if (rc <= 0) {
+        int status = 0;
+        const auto waited = ::waitpid(daemon_pid, &status, WNOHANG);
+        if (waited == daemon_pid) {
+            if (WIFEXITED(status)) {
+                throw std::runtime_error("mount daemon exited early with status " + std::to_string(WEXITSTATUS(status)));
+            }
+            if (WIFSIGNALED(status)) {
+                throw std::runtime_error("mount daemon terminated early by signal " + std::to_string(WTERMSIG(status)));
+            }
+        }
+        throw std::runtime_error("timed out waiting for mount daemon ready signal");
+    }
+
+    char ready = 0;
+    if (::read(fd, &ready, 1) != 1 || ready != '1') {
+        throw std::runtime_error("mount daemon failed to signal mount readiness");
     }
 }
 
@@ -141,6 +182,7 @@ int main(int argc, char** argv) {
     try {
         install_signal_handlers();
         glfs::reset_benchmark_stop();
+        glfs::tracing_init();
 
         if (argc != 3 || std::string(argv[1]) != "--config") {
             std::cerr << "usage: glfs_benchmark --config FILE\n";
@@ -150,9 +192,16 @@ int main(int argc, char** argv) {
         const std::filesystem::path config_path = argv[2];
         const auto cfg = glfs::load_config(config_path.string());
         const auto daemon_exe = std::filesystem::absolute(std::filesystem::path(argv[0]).parent_path() / "gpufs");
+        int ready_pipe[2] = {-1, -1};
+        if (::pipe(ready_pipe) != 0) {
+            throw std::runtime_error("failed to create mount daemon ready pipe");
+        }
 
-        const auto daemon_pid = launch_mount_daemon(daemon_exe, config_path.string());
+        const auto daemon_pid = launch_mount_daemon(daemon_exe, config_path.string(), ready_pipe[1]);
+        (void)::close(ready_pipe[1]);
         try {
+            wait_for_mount_ready_fd(ready_pipe[0], daemon_pid, cfg.benchmark.mount_wait_timeout_ms);
+            (void)::close(ready_pipe[0]);
             wait_for_mount(cfg.fs.mount_point, daemon_pid, cfg.benchmark.mount_wait_timeout_ms, cfg.benchmark.mount_poll_interval_ms);
 
             ensure_not_interrupted();
@@ -162,6 +211,9 @@ int main(int argc, char** argv) {
 
             unmount_path(cfg.fs.mount_point);
         } catch (...) {
+            if (ready_pipe[0] >= 0) {
+                (void)::close(ready_pipe[0]);
+            }
             try {
                 unmount_path(cfg.fs.mount_point);
             } catch (...) {
@@ -172,8 +224,10 @@ int main(int argc, char** argv) {
 
         terminate_daemon(daemon_pid, cfg.benchmark.daemon_stop_timeout_ms, cfg.benchmark.mount_poll_interval_ms);
 
+        glfs::tracing_shutdown();
         return 0;
     } catch (const std::exception& ex) {
+        glfs::tracing_shutdown();
         std::cerr << "fatal: " << ex.what() << '\n';
         return 1;
     }

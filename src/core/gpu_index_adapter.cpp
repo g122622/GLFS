@@ -6,6 +6,8 @@
 #include <numeric>
 #include <sstream>
 
+#include "utils/perfetto_integration.h"
+
 namespace glfs::backends::g_index {
 IGPUIndex* create_backend();
 }  // namespace glfs::backends::g_index
@@ -21,6 +23,7 @@ public:
     void train(const std::vector<std::uint64_t>& keys,
                const std::vector<std::uint64_t>& values,
                const TrainingConfig& cfg) override {
+        TRACE_EVENT("glfs.lookup", "index.static_map.train");
         if (keys.size() != values.size()) {
             throw std::invalid_argument("keys and values size mismatch");
         }
@@ -42,6 +45,7 @@ public:
 
     std::vector<std::uint64_t> batch_lookup(const std::vector<std::uint64_t>& keys,
                                             cudaStream_t) override {
+        TRACE_EVENT("glfs.lookup", "index.static_map.batch_lookup");
         std::vector<std::uint64_t> out;
         out.reserve(keys.size());
         for (auto key : keys) {
@@ -159,6 +163,7 @@ private:
 class LocalGPUControlPlane final : public IGPUControlPlane {
 public:
     void initialize(const std::string& index_type) override {
+        TRACE_EVENT("glfs.lookup", "control_plane.initialize");
         if (index_type.empty()) {
             throw std::invalid_argument("index_type must not be empty");
         }
@@ -171,11 +176,16 @@ public:
     void train(const std::vector<std::uint64_t>& keys,
                const std::vector<std::uint64_t>& values,
                const TrainingConfig& cfg) override {
+        TRACE_EVENT("glfs.lookup", "control_plane.train");
         ensure_index(cfg.index_type);
-        index_->train(keys, values, cfg);
+        {
+            TRACE_EVENT("glfs.lookup", "control_plane.train_index");
+            index_->train(keys, values, cfg);
+        }
     }
 
     ControlResult lookup(std::uint64_t key) override {
+        TRACE_EVENT("glfs.lookup", "control_plane.lookup_single");
         auto results = lookup_batch({key});
         if (!results.empty()) {
             return results.front();
@@ -187,6 +197,7 @@ public:
     }
 
     std::vector<ControlResult> lookup_batch(const std::vector<std::uint64_t>& keys) override {
+        TRACE_EVENT("glfs.lookup", "control_plane.lookup_batch");
         std::vector<ControlResult> results;
         results.reserve(keys.size());
         if (keys.empty()) {
@@ -212,6 +223,7 @@ public:
     }
 
     MutationDecision decide_mutation(const MutationRequest& request) override {
+        TRACE_EVENT("glfs.lookup", "control_plane.decide_mutation");
         MutationDecision decision;
         control_stats_.queued_requests++;
 
@@ -260,11 +272,13 @@ public:
     }
 
     void submit_lookup_batch(const std::vector<std::uint64_t>& keys) override {
+        TRACE_EVENT("glfs.lookup", "control_plane.submit_lookup_batch");
         control_stats_.queued_requests += static_cast<std::uint64_t>(keys.size());
         pending_batches_.push_back(keys);
     }
 
     void set_namespace(const std::map<std::string, std::vector<std::string>>& children) override {
+        TRACE_EVENT("glfs.lookup", "control_plane.set_namespace");
         namespace_children_ = children;
         for (auto& [_, child_list] : namespace_children_) {
             std::sort(child_list.begin(), child_list.end());
@@ -281,6 +295,7 @@ public:
     }
 
     void drain() override {
+        TRACE_EVENT("glfs.lookup", "control_plane.drain");
         for (const auto& batch : pending_batches_) {
             if (!batch.empty()) {
                 (void)index_->batch_lookup(batch);

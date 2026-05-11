@@ -6,9 +6,18 @@
 #include <string_view>
 #include <vector>
 
+#include <cerrno>
+#include <cstdlib>
+#include <cstring>
+#include <sys/types.h>
+
+#include <sys/statfs.h>
+#include <unistd.h>
+
 #include "config/config_manager.h"
 #include "core/gpu_index_adapter.h"
 #include "fuse/gpufs_ops.h"
+#include "utils/perfetto_integration.h"
 
 namespace {
 
@@ -17,6 +26,7 @@ struct fuse* g_fuse_handle = nullptr;
 
 void signal_handler(int) {
     g_shutdown_requested = 1;
+    glfs::tracing_stop_session();
     if (g_fuse_handle) {
         fuse_exit(g_fuse_handle);
     }
@@ -25,6 +35,10 @@ void signal_handler(int) {
 void install_signal_handlers() {
     std::signal(SIGINT, signal_handler);
     std::signal(SIGTERM, signal_handler);
+}
+
+void shutdown_tracing_at_exit() {
+    glfs::tracing_shutdown();
 }
 
 void release_resources(glfs::IGPUControlPlane* control_plane, glfs::GPULearnedFS* fs) {
@@ -36,12 +50,64 @@ void release_resources(glfs::IGPUControlPlane* control_plane, glfs::GPULearnedFS
     }
 }
 
+void force_reset_mount_point(const std::string& mount_point) {
+    const std::string quoted = "\"" + mount_point + "\"";
+    (void)std::system(("fusermount3 -uz " + quoted).c_str());
+    (void)std::system(("fusermount -uz " + quoted).c_str());
+
+    std::error_code ec;
+    const std::filesystem::path path(mount_point);
+    std::filesystem::remove_all(path, ec);
+    ec.clear();
+    if (!std::filesystem::create_directories(path, ec) && ec) {
+        throw std::runtime_error("failed to recreate mount_point: " + mount_point + ": " + ec.message());
+    }
+    if (::chmod(mount_point.c_str(), 0755) != 0) {
+        throw std::runtime_error("failed to chmod mount_point: " + mount_point + ": " + std::string(std::strerror(errno)));
+    }
+}
+
+void prepare_mount_point(const std::string& mount_point) {
+    if (mount_point.empty()) {
+        throw std::runtime_error("mount_point is empty");
+    }
+
+    std::error_code ec;
+    const std::filesystem::path path(mount_point);
+    const bool exists = std::filesystem::exists(path, ec);
+    if (ec) {
+        force_reset_mount_point(mount_point);
+        return;
+    }
+
+    if (!exists) {
+        force_reset_mount_point(mount_point);
+        return;
+    }
+
+    if (!std::filesystem::is_directory(path, ec)) {
+        force_reset_mount_point(mount_point);
+        return;
+    }
+
+    if (::access(mount_point.c_str(), R_OK | W_OK | X_OK) != 0) {
+        force_reset_mount_point(mount_point);
+        return;
+    }
+
+    if (::chmod(mount_point.c_str(), 0755) != 0) {
+        force_reset_mount_point(mount_point);
+    }
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
     try {
         install_signal_handlers();
+        ::atexit(shutdown_tracing_at_exit);
         std::string config_path;
+        std::string ready_fd_value;
 
         for (int i = 1; i < argc; ++i) {
             std::string_view arg = argv[i];
@@ -49,8 +115,12 @@ int main(int argc, char** argv) {
                 config_path = argv[++i];
                 continue;
             }
+            if (arg == "--ready-fd" && i + 1 < argc) {
+                ready_fd_value = argv[++i];
+                continue;
+            }
             if (arg == "--help" || arg == "-h") {
-                std::cout << "usage: glfs_mount_daemon --config FILE\n";
+                std::cout << "usage: glfs_mount_daemon --config FILE [--ready-fd N]\n";
                 return 0;
             }
             throw std::runtime_error(std::string("unsupported command-line argument: ") + std::string(arg));
@@ -59,22 +129,19 @@ int main(int argc, char** argv) {
         if (config_path.empty()) {
             throw std::runtime_error("missing required --config FILE");
         }
+        int ready_fd = -1;
+        if (!ready_fd_value.empty()) {
+            ready_fd = std::stoi(ready_fd_value);
+        }
 
         const auto cfg = glfs::load_config(config_path);
-        if (cfg.fs.mount_point.empty()) {
-            throw std::runtime_error("mount_point is empty");
-        }
-
-        std::error_code ec;
-        if (std::filesystem::exists(cfg.fs.mount_point, ec)) {
-            if (!std::filesystem::is_directory(cfg.fs.mount_point, ec)) {
-                throw std::runtime_error("mount_point exists but is not a directory: " + cfg.fs.mount_point);
-            }
-        } else {
-            if (!std::filesystem::create_directories(cfg.fs.mount_point, ec) && ec) {
-                throw std::runtime_error("failed to create mount_point: " + cfg.fs.mount_point + ": " + ec.message());
-            }
-        }
+        glfs::tracing_init();
+        glfs::TraceSessionOptions trace_options;
+        trace_options.session_name = "glfs-mount-daemon";
+        trace_options.output_path = "trace_glfs_daemon.perfetto-trace";
+        trace_options.write_into_file = true;
+        glfs::tracing_start_session(trace_options);
+        prepare_mount_point(cfg.fs.mount_point);
 
         std::unique_ptr<glfs::IGPUControlPlane, void (*)(glfs::IGPUControlPlane*)> control_plane(
             glfs::create_control_plane(cfg.index.type), glfs::destroy_control_plane);
@@ -83,13 +150,11 @@ int main(int argc, char** argv) {
         glfs::set_active_fs(&fs);
 
         std::vector<std::string> storage;
-        storage.reserve(cfg.fs.fuse_opts.size() + 2);
+        storage.reserve(cfg.fs.fuse_opts.size() + 1);
         storage.push_back(argv[0]);
-        storage.push_back("-f");
         for (const auto& opt : cfg.fs.fuse_opts) {
             storage.push_back(opt);
         }
-        storage.push_back(cfg.fs.mount_point);
 
         std::vector<char*> fuse_args;
         fuse_args.reserve(storage.size());
@@ -113,9 +178,20 @@ int main(int argc, char** argv) {
                 g_fuse_handle = nullptr;
                 throw std::runtime_error("failed to mount FUSE filesystem");
             }
+            std::cout << "mounted: " << cfg.fs.mount_point << '\n';
+            std::cout.flush();
+            if (ready_fd >= 0) {
+                const char ready_byte = '1';
+                (void)::write(ready_fd, &ready_byte, 1);
+                (void)::close(ready_fd);
+                ready_fd = -1;
+            }
             ret = fuse_loop(g_fuse_handle);
             fuse_opt_free_args(&fargs);
         } catch (...) {
+            if (ready_fd >= 0) {
+                (void)::close(ready_fd);
+            }
             if (g_fuse_handle) {
                 fuse_unmount(g_fuse_handle);
                 fuse_destroy(g_fuse_handle);
@@ -132,8 +208,10 @@ int main(int argc, char** argv) {
         }
 
         release_resources(control_plane.release(), &fs);
+        glfs::tracing_shutdown();
         return ret == 0 ? 0 : 1;
     } catch (const std::exception& ex) {
+        glfs::tracing_shutdown();
         std::cerr << "fatal: " << ex.what() << '\n';
         return 1;
     }

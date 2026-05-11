@@ -11,6 +11,8 @@
 #include <utility>
 #include <vector>
 
+#include "utils/perfetto_integration.h"
+
 namespace glfs {
 
 namespace {
@@ -55,6 +57,7 @@ GPUControlPlaneRuntime& runtime() {
 }
 
 void ensure_stream(GPUControlPlaneRuntime& rt) {
+    TRACE_EVENT("glfs.lookup", "cuda_control_plane.ensure_stream");
     if (!rt.initialized) {
         if (cudaStreamCreate(&rt.stream) != cudaSuccess) {
             throw std::runtime_error("failed to create CUDA stream");
@@ -64,6 +67,7 @@ void ensure_stream(GPUControlPlaneRuntime& rt) {
 }
 
 void launch_noop() {
+    TRACE_EVENT("glfs.lookup", "cuda_control_plane.launch_noop");
     noop_kernel<<<1, 1>>>();
 }
 
@@ -76,12 +80,17 @@ extern "C" void glfs_launch_noop_kernel() {
 class CUDAQueueControlPlane final : public IGPUControlPlane {
 public:
     void initialize(const std::string& index_type) override {
+        TRACE_EVENT("glfs.lookup", "cuda_control_plane.initialize");
         std::lock_guard<std::mutex> lock(mutex_);
         if (index_type.empty()) {
             throw std::invalid_argument("index_type must not be empty");
         }
-        ensure_stream(rt_);
+        {
+            TRACE_EVENT("glfs.lookup", "cuda_control_plane.initialize_stream");
+            ensure_stream(rt_);
+        }
         if (!index_) {
+            TRACE_EVENT("glfs.lookup", "cuda_control_plane.initialize_index");
             index_.reset(create_index(index_type));
         }
         index_type_ = index_type;
@@ -90,13 +99,24 @@ public:
     void train(const std::vector<std::uint64_t>& keys,
                const std::vector<std::uint64_t>& values,
                const TrainingConfig& cfg) override {
+        TRACE_EVENT("glfs.lookup", "cuda_control_plane.train");
         std::lock_guard<std::mutex> lock(mutex_);
-        ensure_stream(rt_);
-        enqueue_locked(GPURequest{GPURequest::Kind::TrainBatch, keys, values, cfg});
-        process_locked();
+        {
+            TRACE_EVENT("glfs.lookup", "cuda_control_plane.train_ensure_stream");
+            ensure_stream(rt_);
+        }
+        {
+            TRACE_EVENT("glfs.lookup", "cuda_control_plane.train_enqueue");
+            enqueue_locked(GPURequest{GPURequest::Kind::TrainBatch, keys, values, cfg});
+        }
+        {
+            TRACE_EVENT("glfs.lookup", "cuda_control_plane.train_process");
+            process_locked();
+        }
     }
 
     ControlResult lookup(std::uint64_t key) override {
+        TRACE_EVENT("glfs.lookup", "cuda_control_plane.lookup_single");
         ControlResult result;
         auto batch = lookup_batch({key});
         if (!batch.empty()) {
@@ -108,6 +128,7 @@ public:
     }
 
     std::vector<ControlResult> lookup_batch(const std::vector<std::uint64_t>& keys) override {
+        TRACE_EVENT("glfs.lookup", "cuda_control_plane.lookup_batch");
         std::lock_guard<std::mutex> lock(mutex_);
         ensure_stream(rt_);
 
@@ -148,6 +169,7 @@ public:
     }
 
     MutationDecision decide_mutation(const MutationRequest& request) override {
+        TRACE_EVENT("glfs.lookup", "cuda_control_plane.decide_mutation");
         std::lock_guard<std::mutex> lock(mutex_);
         ensure_stream(rt_);
         MutationDecision decision;
@@ -189,12 +211,14 @@ public:
     }
 
     void submit_lookup_batch(const std::vector<std::uint64_t>& keys) override {
+        TRACE_EVENT("glfs.lookup", "cuda_control_plane.submit_lookup_batch");
         std::lock_guard<std::mutex> lock(mutex_);
         ensure_stream(rt_);
         enqueue_locked(GPURequest{GPURequest::Kind::LookupBatch, keys, {}, {}});
     }
 
     void set_namespace(const std::map<std::string, std::vector<std::string>>& children) override {
+        TRACE_EVENT("glfs.lookup", "cuda_control_plane.set_namespace");
         std::lock_guard<std::mutex> lock(mutex_);
         namespace_children_ = children;
         for (auto& [_, child_list] : namespace_children_) {
@@ -213,6 +237,7 @@ public:
     }
 
     void drain() override {
+        TRACE_EVENT("glfs.lookup", "cuda_control_plane.drain");
         std::lock_guard<std::mutex> lock(mutex_);
         ensure_stream(rt_);
         enqueue_locked(GPURequest{GPURequest::Kind::Drain, {}, {}, {}});
@@ -248,11 +273,13 @@ public:
 
 private:
     void enqueue_locked(GPURequest request) {
+        TRACE_EVENT("glfs.lookup", "cuda_control_plane.enqueue_locked");
         rt_.queue.push_back(std::move(request));
         ++rt_.queued_requests;
     }
 
     void process_locked() {
+        TRACE_EVENT("glfs.lookup", "cuda_control_plane.process_locked");
         if (rt_.state == GPUControlPlaneRuntime::State::Faulted) {
             return;
         }
@@ -263,7 +290,8 @@ private:
             rt_.queue.pop_front();
             rt_.state = GPUControlPlaneRuntime::State::Running;
             switch (request.kind) {
-                case GPURequest::Kind::TrainBatch:
+                case GPURequest::Kind::TrainBatch: {
+                    TRACE_EVENT("glfs.lookup", "cuda_control_plane.process_train_batch");
                     if (!index_) {
                         if (request.cfg.index_type.empty()) {
                             throw std::runtime_error("missing index_type for train request");
@@ -273,16 +301,21 @@ private:
                     index_->train(request.keys, request.values, request.cfg);
                     rt_.completed_requests += static_cast<std::uint64_t>(request.keys.size());
                     break;
-                case GPURequest::Kind::LookupBatch:
+                }
+                case GPURequest::Kind::LookupBatch: {
+                    TRACE_EVENT("glfs.lookup", "cuda_control_plane.process_lookup_batch");
                     if (index_) {
                         (void)index_->batch_lookup(request.keys, rt_.stream);
                     } else {
                         rt_.fallback_requests += static_cast<std::uint64_t>(request.keys.size());
                     }
                     break;
-                case GPURequest::Kind::Drain:
+                }
+                case GPURequest::Kind::Drain: {
+                    TRACE_EVENT("glfs.lookup", "cuda_control_plane.process_drain");
                     ++rt_.batch_flushes;
                     break;
+                }
             }
             rt_.state = rt_.queue.empty() ? GPUControlPlaneRuntime::State::Idle
                                           : GPUControlPlaneRuntime::State::Running;

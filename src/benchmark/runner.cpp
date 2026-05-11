@@ -39,6 +39,7 @@ double percentile(std::vector<double> values, double p) {
 std::vector<double> measure_us(std::uint32_t warmup_iters,
                                std::uint32_t measure_iters,
                                const std::function<void()>& op) {
+    TRACE_EVENT("glfs.benchmark", "benchmark.measure_loop");
     std::vector<double> durations;
     durations.reserve(measure_iters);
     for (std::uint32_t i = 0; i < warmup_iters + measure_iters; ++i) {
@@ -103,6 +104,7 @@ BenchmarkResult make_result(const std::string& backend,
 }
 
 std::vector<BenchmarkTreeEntry> collect_tree(const std::filesystem::path& root) {
+    TRACE_EVENT("glfs.benchmark", "benchmark.collect_tree");
     if (root.empty()) {
         throw std::runtime_error("benchmark root path is empty");
     }
@@ -130,6 +132,7 @@ std::vector<BenchmarkResult> run_filesystem_backend(const FSConfig& cfg,
                                                     const std::string& backend,
                                                     const std::filesystem::path& root,
                                                     const std::vector<BenchmarkTreeEntry>& tree) {
+    TRACE_EVENT("glfs.benchmark", "benchmark.run_backend");
     std::vector<BenchmarkResult> results;
     results.reserve(tree.size() * 2);
 
@@ -200,6 +203,12 @@ std::vector<BenchmarkTreeEntry> collect_benchmark_tree(const std::filesystem::pa
 }
 
 std::vector<BenchmarkResult> run_benchmarks(const FSConfig& cfg) {
+    TraceSessionOptions trace_options;
+    trace_options.session_name = "glfs-benchmark";
+    trace_options.output_path = "trace_glfs_benchmark.perfetto-trace";
+    tracing_start_session(trace_options);
+
+    TRACE_EVENT("glfs.benchmark", "benchmark.run_all");
     throw_if_stopped();
     if (cfg.benchmark.report_csv_path.empty()) {
         throw std::runtime_error("missing benchmark.report_csv_path");
@@ -217,7 +226,6 @@ std::vector<BenchmarkResult> run_benchmarks(const FSConfig& cfg) {
     results.insert(results.end(), glfs_results.begin(), glfs_results.end());
     results.insert(results.end(), backing_results.begin(), backing_results.end());
 
-    perfetto_flush();
     std::cerr << "[benchmark] collected " << results.size() << " result rows\n";
     return results;
 }

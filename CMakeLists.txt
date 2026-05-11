@@ -15,8 +15,11 @@ set(CMAKE_CUDA_STANDARD_REQUIRED ON)
 find_package(PkgConfig REQUIRED)
 pkg_check_modules(FUSE3 REQUIRED fuse3)
 find_package(CUDAToolkit REQUIRED)
+find_package(Threads REQUIRED)
 
 add_library(glfs_core
+    third_party/perfetto/perfetto.cc
+    src/utils/perfetto_categories.cpp
     src/utils/json_parser.cpp
     src/utils/perfetto_integration.cpp
     src/config/config_manager.cpp
@@ -37,6 +40,7 @@ add_library(glfs_core
 
 target_include_directories(glfs_core PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}/src
+    ${CMAKE_CURRENT_SOURCE_DIR}/third_party/perfetto
     ${FUSE3_INCLUDE_DIRS}
 )
 
@@ -52,7 +56,7 @@ endif()
 
 target_compile_options(glfs_core PUBLIC ${FUSE3_CFLAGS_OTHER})
 target_link_directories(glfs_core PUBLIC ${FUSE3_LIBRARY_DIRS})
-target_link_libraries(glfs_core PUBLIC ${FUSE3_LIBRARIES} CUDA::cudart)
+target_link_libraries(glfs_core PUBLIC ${FUSE3_LIBRARIES} CUDA::cudart Threads::Threads)
 
 if (GLFS_READ_ONLY_FS)
     target_compile_definitions(glfs_core PUBLIC GLFS_READ_ONLY_FS=1)

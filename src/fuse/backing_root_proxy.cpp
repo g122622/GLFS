@@ -8,6 +8,8 @@
 #include <fcntl.h>
 #include <unistd.h>
 
+#include "utils/perfetto_integration.h"
+
 namespace glfs {
 
 namespace fs = std::filesystem;
@@ -64,6 +66,7 @@ int BackingRootProxy::ensure_root() const {
 }
 
 int BackingRootProxy::getattr(const std::string& absolute_path, struct stat* stbuf) const {
+    TRACE_EVENT("glfs.backing", "backing_root.getattr");
     if (!stbuf) {
         return -EINVAL;
     }
@@ -86,6 +89,7 @@ int BackingRootProxy::getattr(const std::string& absolute_path, struct stat* stb
 }
 
 int BackingRootProxy::listdir(const std::string& absolute_path, std::vector<std::string>& entries) const {
+    TRACE_EVENT("glfs.backing", "backing_root.listdir");
     entries.clear();
     std::error_code ec;
     const auto resolved = resolve(absolute_path);
@@ -105,6 +109,7 @@ int BackingRootProxy::listdir(const std::string& absolute_path, std::vector<std:
 }
 
 int BackingRootProxy::mkdir(const std::string& absolute_path, mode_t) const {
+    TRACE_EVENT("glfs.backing", "backing_root.mkdir");
     std::error_code ec;
     const auto resolved = resolve(absolute_path);
     fs::create_directories(resolved, ec);
@@ -112,6 +117,7 @@ int BackingRootProxy::mkdir(const std::string& absolute_path, mode_t) const {
 }
 
 int BackingRootProxy::rmdir(const std::string& absolute_path) const {
+    TRACE_EVENT("glfs.backing", "backing_root.rmdir");
     std::error_code ec;
     const auto resolved = resolve(absolute_path);
     auto removed = fs::remove(resolved, ec);
@@ -122,6 +128,7 @@ int BackingRootProxy::rmdir(const std::string& absolute_path) const {
 }
 
 int BackingRootProxy::create(const std::string& absolute_path, mode_t) const {
+    TRACE_EVENT("glfs.backing", "backing_root.create");
     std::error_code ec;
     auto resolved = resolve(absolute_path);
     fs::create_directories(fs::path(resolved).parent_path(), ec);
@@ -137,6 +144,7 @@ int BackingRootProxy::create(const std::string& absolute_path, mode_t) const {
 }
 
 int BackingRootProxy::unlink(const std::string& absolute_path) const {
+    TRACE_EVENT("glfs.backing", "backing_root.unlink");
     std::error_code ec;
     const auto resolved = resolve(absolute_path);
     auto removed = fs::remove(resolved, ec);
@@ -147,6 +155,7 @@ int BackingRootProxy::unlink(const std::string& absolute_path) const {
 }
 
 int BackingRootProxy::rename(const std::string& from, const std::string& to) const {
+    TRACE_EVENT("glfs.backing", "backing_root.rename");
     std::error_code ec;
     const auto resolved_from = resolve(from);
     const auto resolved_to = resolve(to);
@@ -159,6 +168,7 @@ int BackingRootProxy::rename(const std::string& from, const std::string& to) con
 }
 
 int BackingRootProxy::truncate(const std::string& absolute_path, off_t size) const {
+    TRACE_EVENT("glfs.backing", "backing_root.truncate");
     std::error_code ec;
     const auto resolved = resolve(absolute_path);
     fs::resize_file(resolved, static_cast<std::uintmax_t>(size), ec);
@@ -166,6 +176,7 @@ int BackingRootProxy::truncate(const std::string& absolute_path, off_t size) con
 }
 
 int BackingRootProxy::read(const std::string& absolute_path, char* buf, size_t size, off_t offset) const {
+    TRACE_EVENT("glfs.backing", "backing_root.read");
     if (!buf) {
         return -EINVAL;
     }
@@ -184,6 +195,7 @@ int BackingRootProxy::read(const std::string& absolute_path, char* buf, size_t s
 }
 
 int BackingRootProxy::write(const std::string& absolute_path, const char* buf, size_t size, off_t offset) const {
+    TRACE_EVENT("glfs.backing", "backing_root.write");
     if (!buf) {
         return -EINVAL;
     }
