@@ -245,17 +245,11 @@ public:
             use_stream = 0;
         }
 
-        std::uint64_t* d_queries = nullptr;
-        std::uint64_t* d_results = nullptr;
         try {
-            {
-                TRACE_EVENT("glfs.lookup", "backend.g_index.cuda_alloc_temp");
-                cuda_check(cudaMalloc(&d_queries, keys.size() * sizeof(std::uint64_t)), "cudaMalloc(d_queries)");
-                cuda_check(cudaMalloc(&d_results, out.size() * sizeof(std::uint64_t)), "cudaMalloc(d_results)");
-            }
+            ensure_temp_buffers_locked(keys.size());
             {
                 TRACE_EVENT("glfs.lookup", "backend.g_index.query_h2d");
-                cuda_check(cudaMemcpyAsync(d_queries,
+                cuda_check(cudaMemcpyAsync(d_queries_,
                                            keys.data(),
                                            keys.size() * sizeof(std::uint64_t),
                                            cudaMemcpyHostToDevice,
@@ -268,20 +262,20 @@ public:
             {
                 TRACE_EVENT("glfs.lookup", "backend.g_index.kernel_launch");
                 batch_lookup_kernel<<<static_cast<unsigned int>(grid), static_cast<unsigned int>(block), 0, use_stream>>>(
-                    d_queries,
+                    d_queries_,
                     keys.size(),
                     d_keys_,
                     d_values_,
                     d_segments_,
                     host_segments_.size(),
-                    d_results);
+                    d_results_);
             }
             cuda_check(cudaGetLastError(), "batch_lookup_kernel launch");
 
             {
                 TRACE_EVENT("glfs.lookup", "backend.g_index.result_d2h");
                 cuda_check(cudaMemcpyAsync(out.data(),
-                                           d_results,
+                                           d_results_,
                                            out.size() * sizeof(std::uint64_t),
                                            cudaMemcpyDeviceToHost,
                                            use_stream),
@@ -292,20 +286,7 @@ public:
                 cuda_check(cudaStreamSynchronize(use_stream), "cudaStreamSynchronize");
             }
         } catch (...) {
-            if (d_queries) {
-                cudaFree(d_queries);
-            }
-            if (d_results) {
-                cudaFree(d_results);
-            }
             throw;
-        }
-
-        if (d_queries) {
-            cudaFree(d_queries);
-        }
-        if (d_results) {
-            cudaFree(d_results);
         }
 
         const auto start = std::chrono::steady_clock::now();
@@ -470,6 +451,7 @@ private:
 
     void release_device_locked() {
         TRACE_EVENT("glfs.lookup", "backend.g_index.release_device");
+        release_temp_buffers_locked();
         if (d_keys_) {
             cudaFree(d_keys_);
             d_keys_ = nullptr;
@@ -482,6 +464,30 @@ private:
             cudaFree(d_segments_);
             d_segments_ = nullptr;
         }
+    }
+
+    void ensure_temp_buffers_locked(std::size_t key_count) {
+        TRACE_EVENT("glfs.lookup", "backend.g_index.ensure_temp_buffers");
+        if (temp_capacity_ >= key_count && d_queries_ && d_results_) {
+            return;
+        }
+        release_temp_buffers_locked();
+        temp_capacity_ = key_count;
+        cuda_check(cudaMalloc(&d_queries_, temp_capacity_ * sizeof(std::uint64_t)), "cudaMalloc(d_queries)");
+        cuda_check(cudaMalloc(&d_results_, temp_capacity_ * sizeof(std::uint64_t)), "cudaMalloc(d_results)");
+    }
+
+    void release_temp_buffers_locked() {
+        TRACE_EVENT("glfs.lookup", "backend.g_index.release_temp_buffers");
+        if (d_queries_) {
+            cudaFree(d_queries_);
+            d_queries_ = nullptr;
+        }
+        if (d_results_) {
+            cudaFree(d_results_);
+            d_results_ = nullptr;
+        }
+        temp_capacity_ = 0;
     }
 
     void upload_device_locked() {
@@ -554,6 +560,9 @@ private:
     std::uint64_t* d_keys_ = nullptr;
     std::uint64_t* d_values_ = nullptr;
     DeviceSegment* d_segments_ = nullptr;
+    std::uint64_t* d_queries_ = nullptr;
+    std::uint64_t* d_results_ = nullptr;
+    std::size_t temp_capacity_ = 0;
     std::atomic<std::uint64_t> query_count_{0};
     std::atomic<std::uint64_t> miss_count_{0};
     std::atomic<bool> profiling_enabled_{false};

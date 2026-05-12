@@ -145,6 +145,7 @@ FSConfig load_config(const std::string& filepath) {
 
     const auto& inference = require_section(index, "inference", "index.inference");
     cfg.index.inference.batch_size = require_u32(inference, "batch_size", "index.inference.batch_size");
+    cfg.index.inference.batch_timeout_us = require_u32(inference, "batch_timeout_us", "index.inference.batch_timeout_us");
     cfg.index.inference.fallback_on_miss = require_bool(inference, "fallback_on_miss", "index.inference.fallback_on_miss");
 
     const auto& resource = require_section(index, "resource", "index.resource");
@@ -205,6 +206,9 @@ void validate_config(const FSConfig& cfg) {
     if (cfg.index.inference.batch_size == 0) {
         throw ValidationError("index.inference.batch_size must be > 0");
     }
+    if (cfg.index.inference.batch_timeout_us == 0) {
+        throw ValidationError("index.inference.batch_timeout_us must be > 0");
+    }
     if (cfg.index.inference.fallback_on_miss) {
         throw ValidationError("index.inference.fallback_on_miss must be false");
     }
@@ -241,8 +245,8 @@ void validate_config(const FSConfig& cfg) {
     if (cfg.index.backend.vram_overhead_bytes == 0) {
         throw ValidationError("index.backend.vram_overhead_bytes must be > 0");
     }
-    if (cfg.benchmark.warmup_iters == 0) {
-        throw ValidationError("benchmark.warmup_iters must be > 0");
+    if (cfg.benchmark.warmup_iters < 0) {
+        throw ValidationError("benchmark.warmup_iters must be >= 0");
     }
     if (cfg.benchmark.measure_iters == 0) {
         throw ValidationError("benchmark.measure_iters must be > 0");

@@ -26,9 +26,49 @@ namespace glfs {
 
 namespace {
 
+constexpr std::uint64_t kHandleTagMask = 1ULL << 63;
+
 GPULearnedFS*& active_fs_storage() {
     static GPULearnedFS* fs = nullptr;
     return fs;
+}
+
+std::uint64_t make_handle_id(std::uint64_t raw) {
+    return raw | kHandleTagMask;
+}
+
+bool is_valid_handle_id(std::uint64_t fh) {
+    return (fh & kHandleTagMask) != 0;
+}
+
+std::shared_ptr<GPULearnedFS::OpenHandle> find_open_handle(GPULearnedFS& fs, const struct fuse_file_info* fi) {
+    if (!fi || !is_valid_handle_id(fi->fh)) {
+        return nullptr;
+    }
+    auto it = fs.open_handles.find(fi->fh);
+    if (it == fs.open_handles.end()) {
+        return nullptr;
+    }
+    return it->second;
+}
+
+void install_open_handle(GPULearnedFS& fs,
+                         const std::string& abs_path,
+                         std::uint64_t inode,
+                         bool use_backing_root,
+                         int backing_fd,
+                         struct fuse_file_info* fi) {
+    if (!fi) {
+        return;
+    }
+    auto handle = std::make_shared<GPULearnedFS::OpenHandle>();
+    handle->abs_path = abs_path;
+    handle->inode = inode;
+    handle->use_backing_root = use_backing_root;
+    handle->backing_fd = backing_fd;
+    const std::uint64_t handle_id = make_handle_id(++fs.next_inode);
+    fs.open_handles[handle_id] = std::move(handle);
+    fi->fh = handle_id;
 }
 
 std::optional<ControlResult> gpu_lookup(GPULearnedFS& fs, const std::string& abs_path) {
@@ -53,6 +93,26 @@ std::optional<ControlResult> gpu_lookup(GPULearnedFS& fs, const std::string& abs
         return std::nullopt;
     }
     return results.front();
+}
+
+std::optional<ControlResult> cached_or_gpu_lookup(GPULearnedFS& fs, const std::string& abs_path) {
+    auto cache_it = fs.lookup_cache.find(abs_path);
+    if (cache_it != fs.lookup_cache.end()) {
+        ControlResult cached;
+        cached.inode = cache_it->second.inode;
+        cached.fallback_to_backing_root = cache_it->second.known_missing;
+        cached.reason = cache_it->second.known_missing ? "lookup_cache_miss" : "lookup_cache_hit";
+        return cached;
+    }
+
+    auto result = gpu_lookup(fs, abs_path);
+    if (result.has_value()) {
+        fs.lookup_cache[abs_path] = GPULearnedFS::LookupCacheEntry{
+            result->inode,
+            result->inode == INVALID_INODE,
+        };
+    }
+    return result;
 }
 
 std::string join_mount_path(const std::string& mount_point, const char* path) {
@@ -253,31 +313,6 @@ void refresh_cached_path(GPULearnedFS& fs, const std::string& abs_path) {
     }
 }
 
-int apply_fallback_readdir(GPULearnedFS& fs, const std::string& abs, void* buf, fuse_fill_dir_t filler) {
-    TRACE_EVENT("glfs.backing", "backing_root.readdir_fallback");
-    if (!fs.usable_mode) {
-        return -ENOENT;
-    }
-    std::vector<std::string> entries;
-    const auto rc = fs.backing_root.listdir(abs, entries);
-    if (rc != 0) {
-        return rc;
-    }
-    struct stat dir_stub{};
-    if (fs.backing_root.getattr(abs, &dir_stub) != 0) {
-        return -ENOENT;
-    }
-    filler(buf, ".", &dir_stub, 0, static_cast<fuse_fill_dir_flags>(0));
-    filler(buf, "..", &dir_stub, 0, static_cast<fuse_fill_dir_flags>(0));
-    for (const auto& name : entries) {
-        struct stat st{};
-        const auto child = abs == "/" ? "/" + name : abs + "/" + name;
-        fs.backing_root.getattr(child, &st);
-        filler(buf, name.c_str(), &st, 0, static_cast<fuse_fill_dir_flags>(0));
-    }
-    return 0;
-}
-
 }  // namespace
 
 GPULearnedFS* active_fs() {
@@ -366,8 +401,6 @@ int gpufs_getattr(const char* path, struct stat* stbuf, ::fuse_file_info*) {
     }
     std::lock_guard<std::mutex> lock(fs->global_lock);
     const std::string abs = join_mount_path(fs->mount_point, path);
-    const auto gpu_result = gpu_lookup(*fs, abs);
-
     auto it = fs->nodes.find(abs);
     if (it != fs->nodes.end()) {
         fill_stat_from_node(it->second, stbuf);
@@ -375,6 +408,8 @@ int gpufs_getattr(const char* path, struct stat* stbuf, ::fuse_file_info*) {
         perfetto_track_event("fuse.getattr", start, now_ns() - start);
         return 0;
     }
+
+    const auto gpu_result = gpu_lookup(*fs, abs);
 
     if (gpu_result.has_value() && gpu_result->inode != INVALID_INODE) {
         fill_stat_from_inode(gpu_result->inode, stbuf);
@@ -534,18 +569,29 @@ int gpufs_readdir(const char* path, void* buf, ::fuse_fill_dir_t filler, off_t, 
     return 0;
 }
 
-int gpufs_open(const char* path, struct fuse_file_info*) {
+int gpufs_open(const char* path, struct fuse_file_info* fi) {
     TRACE_EVENT("glfs.fuse", "fuse.open");
     const auto start = now_ns();
     GPULearnedFS* fs = active_fs_storage();
     if (!fs) {
         return -EIO;
     }
+    std::lock_guard<std::mutex> lock(fs->global_lock);
     const std::string abs = join_mount_path(fs->mount_point, path);
-    const auto gpu_result = gpu_lookup(*fs, abs);
     auto it = fs->nodes.find(abs);
+    if (it != fs->nodes.end()) {
+        const int rc = it->second.is_dir ? -EISDIR : 0;
+        if (rc == 0) {
+            install_open_handle(*fs, abs, it->second.inode, false, -1, fi);
+            perfetto_track_event("fuse.open", start, now_ns() - start);
+        }
+        return rc;
+    }
+
+    const auto gpu_result = cached_or_gpu_lookup(*fs, abs);
     if (it == fs->nodes.end()) {
         if (gpu_result.has_value() && gpu_result->inode != INVALID_INODE) {
+            install_open_handle(*fs, abs, gpu_result->inode, false, -1, fi);
             perfetto_track_event("fuse.open", start, now_ns() - start);
             return 0;
         }
@@ -561,16 +607,34 @@ int gpufs_open(const char* path, struct fuse_file_info*) {
         }
         const int rc = S_ISDIR(st.st_mode) ? -EISDIR : 0;
         if (rc == 0) {
+            const int backing_fd = fs->backing_root.open_fd(abs);
+            if (backing_fd < 0) {
+                return backing_fd;
+            }
+            fs->lookup_cache[abs] = GPULearnedFS::LookupCacheEntry{INVALID_INODE, true};
+            install_open_handle(*fs, abs, static_cast<std::uint64_t>(st.st_ino), true, backing_fd, fi);
             perfetto_track_event("fuse.open", start, now_ns() - start);
         }
         return rc;
     }
 
-    const int rc = (it != fs->nodes.end() && it->second.is_dir) ? -EISDIR : 0;
-    if (rc == 0) {
-        perfetto_track_event("fuse.open", start, now_ns() - start);
+    perfetto_track_event("fuse.open", start, now_ns() - start);
+    return 0;
+}
+
+int gpufs_release(const char*, struct fuse_file_info* fi) {
+    GPULearnedFS* fs = active_fs_storage();
+    if (!fs || !fi || !is_valid_handle_id(fi->fh)) {
+        return 0;
     }
-    return rc;
+    std::lock_guard<std::mutex> lock(fs->global_lock);
+    auto it = fs->open_handles.find(fi->fh);
+    if (it != fs->open_handles.end() && it->second && it->second->backing_fd >= 0) {
+        (void)fs->backing_root.close_fd(it->second->backing_fd);
+    }
+    fs->open_handles.erase(fi->fh);
+    fi->fh = 0;
+    return 0;
 }
 
 int gpufs_create(const char* path, mode_t mode, struct fuse_file_info* fi) {
@@ -604,6 +668,7 @@ int gpufs_create(const char* path, mode_t mode, struct fuse_file_info* fi) {
         if (rc < 0) {
             return rc;
         }
+        fs->lookup_cache.erase(abs);
         refresh_cached_path(*fs, abs);
         return 0;
     }
@@ -629,7 +694,7 @@ int gpufs_create(const char* path, mode_t mode, struct fuse_file_info* fi) {
     fs->children[parent].push_back(basename_of(abs));
     std::sort(fs->children[parent].begin(), fs->children[parent].end());
     if (fi) {
-        fi->fh = inode;
+        install_open_handle(*fs, abs, inode, false, -1, fi);
     }
     if (fs->usable_mode) {
         fs->backing_root.create(abs, mode);
@@ -669,6 +734,7 @@ int gpufs_unlink(const char* path) {
         if (rc < 0) {
             return rc;
         }
+        fs->lookup_cache.erase(abs);
         fs->nodes.erase(abs);
         const auto parent = parent_of(abs);
         auto kids_it = fs->children.find(parent);
@@ -730,6 +796,7 @@ int gpufs_mkdir(const char* path, mode_t mode) {
         if (rc < 0) {
             return rc;
         }
+        fs->lookup_cache.erase(abs);
         refresh_cached_path(*fs, abs);
         return 0;
     }
@@ -798,6 +865,8 @@ int gpufs_rename(const char* from, const char* to, unsigned int flags) {
     if (fs->usable_mode) {
         const auto rc = fs->backing_root.rename(abs_from, abs_to);
         if (rc == 0) {
+            fs->lookup_cache.erase(abs_from);
+            fs->lookup_cache.erase(abs_to);
             fs->nodes.erase(abs_from);
             fs->children.erase(abs_from);
             refresh_cached_path(*fs, abs_to);
@@ -885,6 +954,7 @@ int gpufs_truncate(const char* path, off_t size, struct fuse_file_info*) {
     if (fs->usable_mode) {
         const auto rc = fs->backing_root.truncate(abs, size);
         if (rc == 0) {
+            fs->lookup_cache.erase(abs);
             refresh_cached_path(*fs, abs);
         }
         return rc;
@@ -912,7 +982,7 @@ int gpufs_truncate(const char* path, off_t size, struct fuse_file_info*) {
     return 0;
 }
 
-int gpufs_read(const char* path, char* buf, size_t size, off_t offset, struct fuse_file_info*) {
+int gpufs_read(const char* path, char* buf, size_t size, off_t offset, struct fuse_file_info* fi) {
     TRACE_EVENT("glfs.fuse", "fuse.read");
     const auto start = now_ns();
     if (offset < 0) {
@@ -923,15 +993,27 @@ int gpufs_read(const char* path, char* buf, size_t size, off_t offset, struct fu
         return -EIO;
     }
     std::lock_guard<std::mutex> lock(fs->global_lock);
-    const std::string abs = join_mount_path(fs->mount_point, path);
-    const auto gpu_result = gpu_lookup(*fs, abs);
+    auto handle = find_open_handle(*fs, fi);
+    const std::string abs = handle ? handle->abs_path : join_mount_path(fs->mount_point, path);
+    if (handle && handle->use_backing_root && fs->usable_mode) {
+        const auto rc = fs->backing_root.pread_fd(handle->backing_fd, buf, size, offset);
+        if (rc >= 0) {
+            perfetto_track_event("fuse.read", start, now_ns() - start);
+        }
+        return rc;
+    }
+
     auto it = fs->nodes.find(abs);
+    std::optional<ControlResult> gpu_result;
+    if (it == fs->nodes.end()) {
+        gpu_result = cached_or_gpu_lookup(*fs, abs);
+        it = fs->nodes.find(abs);
+    }
     if (it == fs->nodes.end()) {
         if (gpu_result.has_value() && gpu_result->inode != INVALID_INODE) {
             if (fs->usable_mode) {
                 const auto rc = fs->backing_root.read(abs, buf, size, offset);
                 if (rc >= 0) {
-                    refresh_cached_path(*fs, abs);
                     perfetto_track_event("fuse.read", start, now_ns() - start);
                 }
                 return rc;
@@ -946,7 +1028,6 @@ int gpufs_read(const char* path, char* buf, size_t size, off_t offset, struct fu
     if (fs->usable_mode && (!gpu_result.has_value() || gpu_result->inode == INVALID_INODE)) {
         const auto rc = fs->backing_root.read(abs, buf, size, offset);
         if (rc >= 0) {
-            refresh_cached_path(*fs, abs);
             perfetto_track_event("fuse.read", start, now_ns() - start);
         }
         return rc;
@@ -1101,6 +1182,10 @@ static int fuse_open_thunk(const char* path, struct fuse_file_info* fi) {
     return gpufs_open(path, fi);
 }
 
+static int fuse_release_thunk(const char* path, struct fuse_file_info* fi) {
+    return gpufs_release(path, fi);
+}
+
 static int fuse_create_thunk(const char* path, mode_t mode, struct fuse_file_info* fi) {
     return gpufs_create(path, mode, fi);
 }
@@ -1113,6 +1198,7 @@ struct fuse_operations build_fuse_operations() {
     ops.getattr = fuse_getattr_thunk;
     ops.readdir = fuse_readdir_thunk;
     ops.open = fuse_open_thunk;
+    ops.release = fuse_release_thunk;
     ops.create = fuse_create_thunk;
     ops.unlink = [](const char* path) -> int { return gpufs_unlink(path); };
     ops.mkdir = [](const char* path, mode_t mode) -> int { return gpufs_mkdir(path, mode); };

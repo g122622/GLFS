@@ -175,23 +175,54 @@ int BackingRootProxy::truncate(const std::string& absolute_path, off_t size) con
     return ec ? -ec.value() : 0;
 }
 
+int BackingRootProxy::open_fd(const std::string& absolute_path) const {
+    TRACE_EVENT("glfs.backing", "backing_root.open_fd");
+    const auto resolved = resolve(absolute_path);
+    const int fd = ::open(resolved.c_str(), O_RDONLY | O_CLOEXEC);
+    if (fd < 0) {
+        return -errno;
+    }
+    return fd;
+}
+
+int BackingRootProxy::close_fd(int fd) const {
+    TRACE_EVENT("glfs.backing", "backing_root.close_fd");
+    if (fd < 0) {
+        return -EINVAL;
+    }
+    return ::close(fd) == 0 ? 0 : -errno;
+}
+
+int BackingRootProxy::pread_fd(int fd, char* buf, size_t size, off_t offset) const {
+    TRACE_EVENT("glfs.backing", "backing_root.pread_fd");
+    if (fd < 0 || !buf) {
+        return -EINVAL;
+    }
+    const auto n = ::pread(fd, buf, size, offset);
+    if (n < 0) {
+        return -errno;
+    }
+    return static_cast<int>(n);
+}
+
 int BackingRootProxy::read(const std::string& absolute_path, char* buf, size_t size, off_t offset) const {
     TRACE_EVENT("glfs.backing", "backing_root.read");
     if (!buf) {
         return -EINVAL;
     }
-    const auto resolved = resolve(absolute_path);
-    const int fd = ::open(resolved.c_str(), O_RDONLY | O_CLOEXEC);
+    const int fd = open_fd(absolute_path);
     if (fd < 0) {
-        return -ENOENT;
+        return fd;
     }
-    const auto n = ::pread(fd, buf, size, offset);
-    const int saved_errno = errno;
-    ::close(fd);
-    if (n < 0) {
-        return -saved_errno;
+    const int rc = pread_fd(fd, buf, size, offset);
+    const int close_rc = close_fd(fd);
+    if (rc < 0) {
+        return rc;
     }
-    return static_cast<int>(n);
+    if (close_rc < 0) {
+        return close_rc;
+    }
+    return rc;
 }
 
 int BackingRootProxy::write(const std::string& absolute_path, const char* buf, size_t size, off_t offset) const {

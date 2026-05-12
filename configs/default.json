@@ -13,7 +13,8 @@
       "max_epochs": 1
     },
     "inference": {
-      "batch_size": 256,
+      "batch_size": 512,
+      "batch_timeout_us": 10000,
       "fallback_on_miss": false
     },
     "resource": {
@@ -35,8 +36,8 @@
     }
   },
   "benchmark": {
-    "warmup_iters": 100,
-    "measure_iters": 100,
+    "warmup_iters": 0,
+    "measure_iters": 10,
     "read_size_bytes": 1,
     "report_csv_path": "/home/g122622/dev/GLFS/benchmark_report.csv",
     "report_plot_path": "/home/g122622/dev/GLFS/benchmark_report.png",

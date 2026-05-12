@@ -93,7 +93,10 @@ public:
 class IGPUControlPlane {
 public:
     virtual ~IGPUControlPlane() = default;
-    virtual void initialize(const std::string& index_type) = 0;
+    virtual void initialize(const std::string& index_type,
+                            const TrainingConfig& training_cfg,
+                            std::uint32_t inference_batch_size,
+                            std::uint32_t inference_batch_timeout_us) = 0;
     virtual void train(const std::vector<std::uint64_t>& keys,
                        const std::vector<std::uint64_t>& values,
                        const TrainingConfig& cfg) = 0;
@@ -113,7 +116,10 @@ public:
 IGPUIndex* create_index(const std::string& type);
 void destroy_index(IGPUIndex* index);
 
-IGPUControlPlane* create_control_plane(const std::string& type);
+IGPUControlPlane* create_control_plane(const std::string& type,
+                                       const TrainingConfig& training_cfg,
+                                       std::uint32_t inference_batch_size,
+                                       std::uint32_t inference_batch_timeout_us);
 void destroy_control_plane(IGPUControlPlane* control_plane);
 
 }  // namespace glfs

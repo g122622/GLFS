@@ -3,11 +3,15 @@
 #include <cuda_runtime.h>
 
 #include <algorithm>
+#include <chrono>
+#include <condition_variable>
 #include <cstdint>
 #include <deque>
+#include <future>
 #include <mutex>
 #include <stdexcept>
 #include <map>
+#include <optional>
 #include <utility>
 #include <vector>
 
@@ -30,6 +34,11 @@ struct GPURequest {
     std::vector<std::uint64_t> keys;
     std::vector<std::uint64_t> values;
     TrainingConfig cfg;
+};
+
+struct PendingLookup {
+    std::vector<std::uint64_t> keys;
+    std::promise<std::vector<std::uint64_t>> promise;
 };
 
 struct GPUControlPlaneRuntime {
@@ -79,11 +88,20 @@ extern "C" void glfs_launch_noop_kernel() {
 
 class CUDAQueueControlPlane final : public IGPUControlPlane {
 public:
-    void initialize(const std::string& index_type) override {
+    void initialize(const std::string& index_type,
+                    const TrainingConfig& training_cfg,
+                    std::uint32_t inference_batch_size,
+                    std::uint32_t inference_batch_timeout_us) override {
         TRACE_EVENT("glfs.lookup", "cuda_control_plane.initialize");
         std::lock_guard<std::mutex> lock(mutex_);
         if (index_type.empty()) {
             throw std::invalid_argument("index_type must not be empty");
+        }
+        if (inference_batch_size == 0) {
+            throw std::invalid_argument("inference_batch_size must be > 0");
+        }
+        if (inference_batch_timeout_us == 0) {
+            throw std::invalid_argument("inference_batch_timeout_us must be > 0");
         }
         {
             TRACE_EVENT("glfs.lookup", "cuda_control_plane.initialize_stream");
@@ -94,6 +112,9 @@ public:
             index_.reset(create_index(index_type));
         }
         index_type_ = index_type;
+        training_cfg_ = training_cfg;
+        inference_batch_size_ = inference_batch_size;
+        inference_batch_timeout_ = std::chrono::microseconds(inference_batch_timeout_us);
     }
 
     void train(const std::vector<std::uint64_t>& keys,
@@ -129,39 +150,18 @@ public:
 
     std::vector<ControlResult> lookup_batch(const std::vector<std::uint64_t>& keys) override {
         TRACE_EVENT("glfs.lookup", "cuda_control_plane.lookup_batch");
-        std::lock_guard<std::mutex> lock(mutex_);
-        ensure_stream(rt_);
-
         std::vector<ControlResult> results;
         results.reserve(keys.size());
 
-        if (!index_) {
-            for (auto key : keys) {
-                ControlResult result;
-                result.fallback_to_backing_root = true;
-                result.reason = "control_plane_uninitialized";
-                result.inode = INVALID_INODE;
-                results.push_back(std::move(result));
-                ++rt_.fallback_requests;
-                ++rt_.queued_requests;
-            }
-            return results;
-        }
-
-        enqueue_locked(GPURequest{GPURequest::Kind::LookupBatch, keys, {}, {}});
-        process_locked();
-
-        auto values = index_->batch_lookup(keys, rt_.stream);
+        auto values = dispatch_lookup_batch(keys);
         for (auto value : values) {
             ControlResult result;
             if (value != INVALID_INODE) {
                 result.inode = value;
                 result.reason = "control_plane_hit";
-                ++rt_.completed_requests;
             } else {
                 result.fallback_to_backing_root = true;
                 result.reason = "control_plane_miss";
-                ++rt_.fallback_requests;
             }
             results.push_back(std::move(result));
         }
@@ -272,6 +272,105 @@ public:
     }
 
 private:
+    std::vector<std::uint64_t> dispatch_lookup_batch(const std::vector<std::uint64_t>& keys) {
+        std::future<std::vector<std::uint64_t>> future;
+        {
+            std::unique_lock<std::mutex> lock(mutex_);
+            ensure_stream(rt_);
+
+            if (!index_) {
+                std::vector<std::uint64_t> out(keys.size(), INVALID_INODE);
+                rt_.fallback_requests += static_cast<std::uint64_t>(keys.size());
+                rt_.queued_requests += static_cast<std::uint64_t>(keys.size());
+                return out;
+            }
+
+            PendingLookup pending;
+            pending.keys = keys;
+            future = pending.promise.get_future();
+            pending_lookups_.push_back(std::move(pending));
+            rt_.queued_requests += static_cast<std::uint64_t>(keys.size());
+            if (!batch_window_open_) {
+                batch_window_open_ = true;
+                batch_window_start_ = std::chrono::steady_clock::now();
+            }
+
+            if (pending_lookup_key_count_locked() >= inference_batch_size_) {
+                flush_pending_lookups_locked();
+            } else {
+                const auto deadline = batch_window_start_ + inference_batch_timeout_;
+                while (future.wait_for(std::chrono::microseconds(0)) != std::future_status::ready) {
+                    if (pending_lookup_key_count_locked() >= inference_batch_size_) {
+                        flush_pending_lookups_locked();
+                        break;
+                    }
+                    if (pending_lookups_.empty()) {
+                        break;
+                    }
+                    if (batch_cv_.wait_until(lock, deadline) == std::cv_status::timeout) {
+                        flush_pending_lookups_locked();
+                        break;
+                    }
+                }
+            }
+        }
+        return future.get();
+    }
+
+    std::size_t pending_lookup_key_count_locked() const {
+        std::size_t total = 0;
+        for (const auto& pending : pending_lookups_) {
+            total += pending.keys.size();
+        }
+        return total;
+    }
+
+    void flush_pending_lookups_locked() {
+        if (pending_lookups_.empty()) {
+            batch_window_open_ = false;
+            batch_cv_.notify_all();
+            return;
+        }
+
+        std::vector<PendingLookup> pending = std::move(pending_lookups_);
+        pending_lookups_.clear();
+        batch_window_open_ = false;
+
+        std::vector<std::uint64_t> merged_keys;
+        merged_keys.reserve(pending_lookup_key_count(pending));
+        std::vector<std::size_t> offsets;
+        offsets.reserve(pending.size());
+        for (const auto& entry : pending) {
+            offsets.push_back(merged_keys.size());
+            merged_keys.insert(merged_keys.end(), entry.keys.begin(), entry.keys.end());
+        }
+
+        auto values = index_->batch_lookup(merged_keys, rt_.stream);
+        for (std::size_t i = 0; i < pending.size(); ++i) {
+            const auto begin = offsets[i];
+            const auto end = begin + pending[i].keys.size();
+            std::vector<std::uint64_t> slice(values.begin() + static_cast<std::ptrdiff_t>(begin),
+                                             values.begin() + static_cast<std::ptrdiff_t>(end));
+            for (auto value : slice) {
+                if (value != INVALID_INODE) {
+                    ++rt_.completed_requests;
+                } else {
+                    ++rt_.fallback_requests;
+                }
+            }
+            pending[i].promise.set_value(std::move(slice));
+        }
+        batch_cv_.notify_all();
+    }
+
+    static std::size_t pending_lookup_key_count(const std::vector<PendingLookup>& pending) {
+        std::size_t total = 0;
+        for (const auto& entry : pending) {
+            total += entry.keys.size();
+        }
+        return total;
+    }
+
     void enqueue_locked(GPURequest request) {
         TRACE_EVENT("glfs.lookup", "cuda_control_plane.enqueue_locked");
         rt_.queue.push_back(std::move(request));
@@ -304,9 +403,7 @@ private:
                 }
                 case GPURequest::Kind::LookupBatch: {
                     TRACE_EVENT("glfs.lookup", "cuda_control_plane.process_lookup_batch");
-                    if (index_) {
-                        (void)index_->batch_lookup(request.keys, rt_.stream);
-                    } else {
+                    if (!index_) {
                         rt_.fallback_requests += static_cast<std::uint64_t>(request.keys.size());
                     }
                     break;
@@ -326,15 +423,25 @@ private:
     }
 
     mutable std::mutex mutex_;
+    std::condition_variable batch_cv_;
     std::unique_ptr<IGPUIndex> index_;
     std::string index_type_;
+    TrainingConfig training_cfg_{};
+    std::uint32_t inference_batch_size_ = 0;
+    std::chrono::microseconds inference_batch_timeout_{};
+    bool batch_window_open_ = false;
+    std::chrono::steady_clock::time_point batch_window_start_{};
+    std::vector<PendingLookup> pending_lookups_;
     GPUControlPlaneRuntime& rt_ = runtime();
     std::map<std::string, std::vector<std::string>> namespace_children_;
 };
 
-IGPUControlPlane* create_control_plane(const std::string& type) {
+IGPUControlPlane* create_control_plane(const std::string& type,
+                                       const TrainingConfig& training_cfg,
+                                       std::uint32_t inference_batch_size,
+                                       std::uint32_t inference_batch_timeout_us) {
     auto* cp = new CUDAQueueControlPlane();
-    cp->initialize(type);
+    cp->initialize(type, training_cfg, inference_batch_size, inference_batch_timeout_us);
     return cp;
 }
 

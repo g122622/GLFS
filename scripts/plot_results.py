@@ -19,6 +19,35 @@ OPERATIONS = ["stat_getattr", "readdir", "open", "read_lookup"]
 METRIC_FIELDS = ["p50_us", "p99_us", "p999_us", "throughput_qps", "query_count", "miss_count", "gpu_util_percent", "vram_usage_bytes"]
 
 
+def format_bar_value(value: float) -> str:
+    if value == 0:
+        return "0"
+    if abs(value) >= 1000:
+        return f"{value:,.0f}"
+    if abs(value) >= 10:
+        return f"{value:.1f}"
+    return f"{value:.2f}"
+
+
+def annotate_bars(ax: plt.Axes, bars) -> None:
+    heights = [bar.get_height() for bar in bars]
+    if not heights:
+        return
+    max_height = max(heights)
+    offset = max_height * 0.015 if max_height > 0 else 0.02
+    for bar in bars:
+        height = bar.get_height()
+        ax.text(
+            bar.get_x() + bar.get_width() / 2,
+            height + offset,
+            format_bar_value(height),
+            ha="center",
+            va="bottom",
+            fontsize=8,
+            rotation=0,
+        )
+
+
 def load_config(config_path: Path) -> dict:
     with config_path.open("r", encoding="utf-8") as fh:
         return json.load(fh)
@@ -97,7 +126,8 @@ def plot_metric_summary(rows: list[dict[str, str]], output_path: Path) -> None:
                 subset = [float(row[metric]) for row in rows if row["backend"] == backend and row["operation"] == op]
                 values.append(sum(subset) / len(subset) if subset else 0.0)
             offsets = [x + (idx - (len(backends) - 1) / 2) * width for x in x_positions]
-            ax.bar(offsets, values, width=width, label=backend)
+            bars = ax.bar(offsets, values, width=width, label=backend)
+            annotate_bars(ax, bars)
         ax.set_xticks(x_positions)
         ax.set_xticklabels(operations, rotation=15)
         ax.set_title(metric)
@@ -123,7 +153,8 @@ def plot_resource_summary(rows: list[dict[str, str]], output_path: Path) -> None
                 subset = [float(row[metric]) for row in rows if row["backend"] == backend and row["operation"] == op]
                 values.append(sum(subset) / len(subset) if subset else 0.0)
             offsets = [x + (idx - (len(backends) - 1) / 2) * width for x in x_positions]
-            ax.bar(offsets, values, width=width, label=backend)
+            bars = ax.bar(offsets, values, width=width, label=backend)
+            annotate_bars(ax, bars)
         ax.set_title(metric)
         ax.grid(axis="y", linestyle="--", alpha=0.3)
         ax.legend(fontsize=8)

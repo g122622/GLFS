@@ -1,9 +1,11 @@
 #pragma once
 
 #include <cstdint>
+#include <memory>
 #include <map>
 #include <mutex>
 #include <string>
+#include <unordered_map>
 #include <vector>
 #include <ctime>
 
@@ -34,6 +36,18 @@ struct GPULearnedFS {
         std::vector<std::uint8_t> data;  // files only
     };
 
+    struct LookupCacheEntry {
+        std::uint64_t inode = INVALID_INODE;
+        bool known_missing = false;
+    };
+
+    struct OpenHandle {
+        std::string abs_path;
+        std::uint64_t inode = INVALID_INODE;
+        bool use_backing_root = false;
+        int backing_fd = -1;
+    };
+
     IGPUControlPlane* control_plane = nullptr;
     BackingRootProxy backing_root;
     PathConfig path_cfg;
@@ -43,6 +57,8 @@ struct GPULearnedFS {
     mutable std::mutex global_lock;
     std::map<std::string, NodeEntry> nodes;
     std::map<std::string, std::vector<std::string>> children;
+    std::unordered_map<std::string, LookupCacheEntry> lookup_cache;
+    std::unordered_map<std::uint64_t, std::shared_ptr<OpenHandle>> open_handles;
     std::uint64_t next_inode = 1;
 };
 
@@ -53,6 +69,7 @@ void gpufs_init(GPULearnedFS& fs,
 int gpufs_getattr(const char* path, struct stat* stbuf, struct fuse_file_info* fi);
 int gpufs_readdir(const char* path, void* buf, fuse_fill_dir_t filler, off_t offset, struct fuse_file_info* fi, enum fuse_readdir_flags flags);
 int gpufs_open(const char* path, struct fuse_file_info* fi);
+int gpufs_release(const char* path, struct fuse_file_info* fi);
 int gpufs_create(const char* path, mode_t mode, struct fuse_file_info* fi);
 int gpufs_unlink(const char* path);
 int gpufs_mkdir(const char* path, mode_t mode);

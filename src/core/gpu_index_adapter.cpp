@@ -162,7 +162,10 @@ private:
 
 class LocalGPUControlPlane final : public IGPUControlPlane {
 public:
-    void initialize(const std::string& index_type) override {
+    void initialize(const std::string& index_type,
+                    const TrainingConfig&,
+                    std::uint32_t,
+                    std::uint32_t) override {
         TRACE_EVENT("glfs.lookup", "control_plane.initialize");
         if (index_type.empty()) {
             throw std::invalid_argument("index_type must not be empty");
@@ -355,6 +358,15 @@ IGPUIndex* create_index(const std::string& type) {
 
 void destroy_index(IGPUIndex* index) {
     delete index;
+}
+
+IGPUControlPlane* create_control_plane(const std::string& type,
+                                       const TrainingConfig& training_cfg,
+                                       std::uint32_t inference_batch_size,
+                                       std::uint32_t inference_batch_timeout_us) {
+    auto* cp = new LocalGPUControlPlane();
+    cp->initialize(type, training_cfg, inference_batch_size, inference_batch_timeout_us);
+    return cp;
 }
 
 void destroy_control_plane(IGPUControlPlane* control_plane) {

@@ -20,11 +20,27 @@ int main() {
 
     PathConfig pc;
     pc.mount_point = "/home/user/data";
+    pc.max_depth = 32;
+    pc.bits_per_level = 8;
     auto key = encode_path("/home/user/data/train/img/cat.jpg", pc);
     assert(key.value != EncodedKey::INVALID_KEY);
 
+    TrainingConfig tcfg;
+    tcfg.index_type = "g-index";
+    tcfg.sample_ratio = 1.0f;
+    tcfg.max_epochs = 1;
+    tcfg.max_vram_mb = 256;
+    tcfg.segment_base_width = 256;
+    tcfg.segment_min_width = 32;
+    tcfg.segment_max_width = 4096;
+    tcfg.segment_epoch_cap = 8;
+    tcfg.lookup_window = 32;
+    tcfg.cuda_block_size = 256;
+    tcfg.latency_history_limit = 1024;
+    tcfg.vram_overhead_bytes = 1024;
+
     auto* idx = create_index("g-index");
-    idx->train({1, 2, 3}, {10, 20, 30}, TrainingConfig{});
+    idx->train({1, 2, 3}, {10, 20, 30}, tcfg);
     auto out = idx->batch_lookup({2, 4});
     assert(out[0] == 20);
     assert(out[1] == INVALID_INODE);

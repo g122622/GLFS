@@ -21,6 +21,23 @@
 
 namespace {
 
+glfs::TrainingConfig make_training_config(const glfs::FSConfig& cfg) {
+    glfs::TrainingConfig tcfg;
+    tcfg.index_type = cfg.index.type;
+    tcfg.sample_ratio = cfg.index.training.sample_ratio;
+    tcfg.max_epochs = cfg.index.training.max_epochs;
+    tcfg.max_vram_mb = static_cast<std::size_t>(cfg.index.resource.max_vram_bytes / (1024ULL * 1024ULL));
+    tcfg.segment_base_width = cfg.index.backend.segment_base_width;
+    tcfg.segment_min_width = cfg.index.backend.segment_min_width;
+    tcfg.segment_max_width = cfg.index.backend.segment_max_width;
+    tcfg.segment_epoch_cap = cfg.index.backend.segment_epoch_cap;
+    tcfg.lookup_window = cfg.index.backend.lookup_window;
+    tcfg.cuda_block_size = cfg.index.backend.cuda_block_size;
+    tcfg.latency_history_limit = cfg.index.backend.latency_history_limit;
+    tcfg.vram_overhead_bytes = cfg.index.backend.vram_overhead_bytes;
+    return tcfg;
+}
+
 volatile std::sig_atomic_t g_shutdown_requested = 0;
 struct fuse* g_fuse_handle = nullptr;
 
@@ -143,8 +160,13 @@ int main(int argc, char** argv) {
         glfs::tracing_start_session(trace_options);
         prepare_mount_point(cfg.fs.mount_point);
 
+        const auto training_cfg = make_training_config(cfg);
         std::unique_ptr<glfs::IGPUControlPlane, void (*)(glfs::IGPUControlPlane*)> control_plane(
-            glfs::create_control_plane(cfg.index.type), glfs::destroy_control_plane);
+            glfs::create_control_plane(cfg.index.type,
+                                       training_cfg,
+                                       cfg.index.inference.batch_size,
+                                       cfg.index.inference.batch_timeout_us),
+            glfs::destroy_control_plane);
         glfs::GPULearnedFS fs{};
         glfs::gpufs_init(fs, control_plane.get(), cfg);
         glfs::set_active_fs(&fs);

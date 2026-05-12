@@ -29,6 +29,7 @@ struct FSConfig {
         } training;
         struct {
             std::uint32_t batch_size;
+            std::uint32_t batch_timeout_us;
             bool fallback_on_miss;
         } inference;
         struct {

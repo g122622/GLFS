@@ -29,6 +29,9 @@ public:
     int unlink(const std::string& absolute_path) const;
     int rename(const std::string& from, const std::string& to) const;
     int truncate(const std::string& absolute_path, off_t size) const;
+    int open_fd(const std::string& absolute_path) const;
+    int close_fd(int fd) const;
+    int pread_fd(int fd, char* buf, size_t size, off_t offset) const;
     int read(const std::string& absolute_path, char* buf, size_t size, off_t offset) const;
     int write(const std::string& absolute_path, const char* buf, size_t size, off_t offset) const;
 
